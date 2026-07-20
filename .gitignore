@@ -1,0 +1,12 @@
+build/
+bin/
+*.o
+*.a
+*.iso
+mps_output/
+.DS_Store
+*.user
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
