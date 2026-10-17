@@ -1,0 +1,37 @@
+#.github/workflows/ci.yml
+name: CI Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch: # تشغيل يدوي بضغطة زرار من GitHub Actions!
+
+jobs:
+  build-linux:
+    name: Linux GCC Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies & FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake build-essential pkg-config \
+                                  libavformat-dev libavcodec-dev libavutil-dev \
+                                  libswscale-dev libswresample-dev
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build UMDPlay Executable
+        run: cmake --build build --config Release
+
+      - name: Verify Binary
+        run: |
+          ls -lh build/bin/umdplay
+          ./build/bin/umdplay || true
+
