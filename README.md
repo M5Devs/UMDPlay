@@ -1,13 +1,14 @@
 # UMDPlay (UMD Video Player)
 
+[![CI Build](https://github.com/M5Devs/UMDPlay/actions/workflows/ci.yml/badge.svg)](https://github.com/M5Devs/UMDPlay/actions/workflows/ci.yml)
 ![License: GPL v2](https://img.shields.io/badge/License-GPLv2-blue.svg)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)
-![Status](https://img.shields.io/badge/Status-Planning-yellow)
+![Status](https://img.shields.io/badge/Status-Phase%202%20Complete-brightgreen)
 ![Language](https://img.shields.io/badge/Language-C%2B%2B17-orange)
 ![Build System](https://img.shields.io/badge/Build-CMake-red)
 ![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen)
 
-> A lightweight, cross-platform C++ library and standalone media player designed to parse, decode, and play **UMD Video ISOs** — the missing link in PSP preservation.
+> A lightweight, cross-platform C++17 library and standalone media player designed to parse, decode, and play **UMD Video ISOs** on the fly without disk extraction — the missing link in PSP preservation.
 
 The ultimate goal of this project is to achieve a stable, low-overhead playback layer for UMD Video content that can be seamlessly integrated into existing PSP emulators (such as **PPSSPP**) or used as an independent preservation tool.
 
@@ -15,14 +16,14 @@ The ultimate goal of this project is to achieve a stable, low-overhead playback 
 
 ## 🚀 Vision & Motivation
 
-While PlayStation Portable (PSP) game emulation has reached near-perfection, native support for **UMD Video ISOs** remains largely unsupported or unstable across all major emulators.
+While PlayStation Portable (PSP) game emulation has reached near-perfection, native support for **UMD Video ISOs** remains largely unsupported across all major emulators.
 
 UMD Video discs use a specific filesystem structure rooted in the `UMD_VIDEO/` directory, containing:
-- **MPEG Program Stream (`.MPS`)** containers with **H.264 AVC or MPEG-2** video tracks (title-dependent)
-- **ATRAC3plus**, **AC3**, or **LPCM** audio formats
+- **MPEG Program Stream (`.MPS`)** containers with **H.264 AVC or MPEG-2** video tracks
+- **ATRAC3plus** audio formats packed inside proprietary Sony **Private Stream 1 (`0xBD`)**
 - Interactive menu overlays built on **`.RCO` / `.VBO`** assets
 
-**UMDPlay** aims to bridge this gap by building a dedicated, efficient decoder from the ground up — in pure C++ with FFmpeg — heavily optimized to run even on low-spec legacy hardware.
+**UMDPlay** bridges this gap by decoding streams directly in memory via FFmpeg `AVIOContext`, eliminating the need for multi-gigabyte disk extraction.
 
 ---
 
@@ -30,58 +31,46 @@ UMD Video discs use a specific filesystem structure rooted in the `UMD_VIDEO/` d
 
 | Component | Technology | Notes |
 |---|---|---|
-| Language | C++17 | Modern standard, no C++20 for max compiler compatibility |
-| Decoder | FFmpeg (libavcodec / libavformat) | Linked as pre-compiled static libraries |
-| Windowing & Events | SDL2 | Software renderer default; optional GPU backend for capable systems |
-| Build System | CMake | Cross-platform, supports MinGW / MSVC / GCC / NDK |
-
-### 🎯 Target Platforms
-
-| Platform | Toolchain | Status |
-|---|---|---|
-| 🪟 Windows | MinGW / MSVC | Primary target |
-| 🐧 Linux | Native GCC | Primary target |
-| 🤖 Android | Android NDK | Long-term — contributions welcome |
-
----
-
-## 📂 Project Structure
-
-```text
-UMDPlay/
-├── CMakeLists.txt              # Core build configuration
-├── docs/
-│   └── ARCHITECTURE.md         # Technical breakdown of the decoding pipeline
-├── include/                    # Public header files
-│   ├── iso_reader.h            # ISO 9660/UDF filesystem + UMD_VIDEO/ parser
-│   ├── decoder.h               # FFmpeg context handles, demuxer, A/V sync
-│   └── ui_manager.h            # SDL2 rendering loop and event handling
-├── src/                        # Implementation files
-│   ├── main.cpp                # Application entry point
-│   ├── iso_reader.cpp
-│   ├── decoder.cpp
-│   └── ui_manager.cpp
-└── thirdparty/                 # Vendored static libraries + headers
-    ├── ffmpeg/
-    └── sdl2/
-```
+| Language | C++17 | Modern standard, max compiler compatibility |
+| Decoder | FFmpeg (libavcodec / libavformat) | In-memory stream demuxing & decoding |
+| Output & Rendering | SDL2 | Software & GPU-accelerated video/audio output |
+| Build System | CMake | Cross-platform, supports MinGW / MSVC / GCC |
 
 ---
 
 ## 🗺️ Roadmap
 
-- [ ] **Phase 1** — ISO Parser: navigate `UMD_VIDEO/STREAM/`, extract raw `.MPS` bytes from the UDF filesystem
-- [ ] **Phase 2** — FFmpeg Integration: demux and decode `.MPS` containers with strict A/V synchronization
-- [ ] **Phase 3** — SDL2 GUI: standalone player with Play, Pause, Seek, and Volume controls
-- [ ] **Phase 4** — Menu Research: reverse-engineer UMD interactive menus via `.RCO` / `.VBO` overlays
-- [ ] **Phase 5** — PPSSPP API: expose a clean C-style API for upstream integration
+- [x] **Phase 1 — ISO & UDF Parser**: navigate `UMD_VIDEO/STREAM/`, dynamically resolve LBAs and file sizes from sector 28.
+- [x] **Phase 2 — Streaming & Decoding**: in-memory streaming via custom `AVIOContext`, H.264 AVC video decoding, and Sony PSMF ATRAC3+ audio frame reverse-engineering.
+- [ ] **Phase 3 — Standalone SDL2 Player**: synced real-time A/V playback window with keyboard controls (Play, Pause, Seek).
+- [ ] **Phase 4 — Menu Research**: reverse-engineer interactive menus via `.RCO` / `.VBO` overlays.
+- [ ] **Phase 5 — PPSSPP Integration**: expose a clean C-style API for native upstream integration.
 
 ---
 
 ## 🔧 Building from Source
 
-> ⚠️ Build instructions will be available once Phase 1 is complete.  
-> For dependency notes and architecture decisions, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+### Prerequisites (Ubuntu / Debian)
+```bash
+sudo apt-get update
+sudo apt-get install -y cmake build-essential pkg-config \
+                        libavformat-dev libavcodec-dev libavutil-dev \
+                        libswscale-dev libswresample-dev
+```
+
+### Build Steps
+```bash
+# 1. Clone the repository
+git clone https://github.com/M5Devs/UMDPlay.git
+cd UMDPlay
+
+# 2. Configure & Build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+
+# 3. Run directly against any UMD Video ISO
+./build/bin/umdplay /path/to/movie.iso
+```
 
 ---
 
@@ -94,20 +83,9 @@ UMDPlay/
 
 ---
 
-## 🤝 Contributing
-
-This project is open to **Reverse Engineers**, **Emulation Developers**, and **Multimedia enthusiasts**.
-
-Before submitting a pull request or opening a structural issue, please review the architecture notes in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) to align with the project's design philosophy.
-
-For smaller contributions, feel free to open an issue and start a discussion.
-
----
-
 ## 📜 License
 
-This project is licensed under the **GNU General Public License v2.0 (GPLv2)**.
-
+This project is licensed under the **GNU General Public License v2.0 (GPLv2)**.  
 GPLv2 was chosen specifically to ensure **license compatibility with the PPSSPP project**, enabling clean upstream integration without legal friction.
 
 *Disclaimer: This project is strictly for digital preservation and educational purposes. "PSP" and "UMD" are trademarks of Sony Interactive Entertainment Inc.*
