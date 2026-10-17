@@ -4,7 +4,7 @@ bin/
 *.o
 *.a
 *.so
-umdvplay_test
+umdplay_test
 
 # Media & Dumps
 *.iso
