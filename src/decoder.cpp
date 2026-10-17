@@ -4,6 +4,7 @@
 #include <sstream>
 
 static constexpr size_t AVIO_BUF_SIZE = 64 * 1024;
+static const uint8_t SONY_FRAME_HEADER[8] = { 0x0F, 0xD0, 0x48, 0x55, 0x00, 0x00, 0x00, 0x00 };
 
 Decoder::Decoder() {}
 Decoder::~Decoder() { close(); }
@@ -93,42 +94,195 @@ bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
                 avcodec_parameters_to_context(m_video.codec_ctx, codecpar);
                 avcodec_open2(m_video.codec_ctx, decoder, nullptr);
             }
+        } else if ((codecpar->codec_type == AVMEDIA_TYPE_AUDIO || st->id == 0x1BD || codecpar->codec_id == AV_CODEC_ID_ATRAC3P) && m_audio.stream_index == -1) {
+            m_audio.stream_index = i;
         }
     }
 
-    return (m_video.stream_index != -1);
+    if (m_audio.stream_index == -1) {
+        // Fallback: check streams by ID if not recognized as AVMEDIA_TYPE_AUDIO
+        for (unsigned int i = 0; i < m_fmt_ctx->nb_streams; i++) {
+            AVStream* st = m_fmt_ctx->streams[i];
+            if (st->id == 0x1BD || st->id == 0xBD) {
+                m_audio.stream_index = i;
+                break;
+            }
+        }
+    }
+
+    if (m_audio.stream_index != -1) {
+        // Calculate block_align by scanning first audio packets for 8-byte Sony frame sync headers
+        avio_seek(m_avio_ctx, 0, SEEK_SET);
+        av_seek_frame(m_fmt_ctx, m_audio.stream_index, 0, AVSEEK_FLAG_BACKWARD);
+
+        AVPacket* probe_pkt = av_packet_alloc();
+        std::vector<size_t> header_offsets;
+        int packets_read = 0;
+
+        while (av_read_frame(m_fmt_ctx, probe_pkt) >= 0 && packets_read < 50) {
+            if (probe_pkt->stream_index == m_audio.stream_index) {
+                packets_read++;
+                const uint8_t* data = probe_pkt->data;
+                int size = probe_pkt->size;
+
+                // Strip PES sub-header if present
+                if (size > 4 && data[0] == 0x00) {
+                    data += 4;
+                    size -= 4;
+                }
+
+                for (int pos = 0; pos <= size - 8; pos++) {
+                    if (std::memcmp(data + pos, SONY_FRAME_HEADER, 8) == 0) {
+                        header_offsets.push_back(pos);
+                    }
+                }
+
+                if (header_offsets.size() >= 2) break;
+            }
+            av_packet_unref(probe_pkt);
+        }
+        av_packet_free(&probe_pkt);
+
+        int calculated_block_align = 0;
+        if (header_offsets.size() >= 2) {
+            calculated_block_align = static_cast<int>(header_offsets[1] - header_offsets[0] - 8);
+        } else {
+            // Default fallback block align for Sony PSMF ATRAC3+ stereo if probing single frame
+            calculated_block_align = 368;
+        }
+
+        const AVCodec* audio_decoder = avcodec_find_decoder(AV_CODEC_ID_ATRAC3P);
+        if (audio_decoder) {
+            m_audio.codec = audio_decoder;
+            m_audio.codec_ctx = avcodec_alloc_context3(audio_decoder);
+            m_audio.block_align = calculated_block_align;
+
+            m_audio.codec_ctx->sample_rate = 44100;
+            m_audio.codec_ctx->ch_layout = AV_CHANNEL_LAYOUT_STEREO;
+            m_audio.codec_ctx->block_align = calculated_block_align;
+            m_audio.codec_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
+
+            if (avcodec_open2(m_audio.codec_ctx, audio_decoder, nullptr) < 0) {
+                avcodec_free_context(&m_audio.codec_ctx);
+                m_audio.stream_index = -1;
+            }
+        } else {
+            m_audio.stream_index = -1;
+        }
+
+        // Reset stream read positions
+        avio_flush(m_avio_ctx);
+        avio_seek(m_avio_ctx, 0, SEEK_SET);
+    }
+
+    return (m_video.stream_index != -1 || m_audio.stream_index != -1);
+}
+
+void Decoder::process_audio_packet(AVPacket* pkt, AVFrame* audio_frame, int& audio_frames_decoded) {
+    if (!m_audio.codec_ctx || pkt->size <= 0) return;
+
+    const uint8_t* data = pkt->data;
+    int size = pkt->size;
+
+    // 1. Packet Detection & Filtering (Private Stream 1)
+    // Audio packets payload starts with stream_id == 0x00 for Primary Audio Track
+    if (size > 4 && data[0] == 0x00) {
+        // Skip 4-byte PES audio header (byte 0..1 stream/substream, byte 2..3 access unit ptr)
+        data += 4;
+        size -= 4;
+    }
+
+    // Append to continuous audio buffer
+    m_audio_buffer.insert(m_audio_buffer.end(), data, data + size);
+
+    // Parse frames from buffer using 8-byte frame header and block_align
+    while (m_audio_buffer.size() >= 8) {
+        // Find Sony header
+        auto it = std::search(m_audio_buffer.begin(), m_audio_buffer.end(),
+                              SONY_FRAME_HEADER, SONY_FRAME_HEADER + 8);
+        if (it == m_audio_buffer.end()) {
+            // Header not found yet, keep last 7 bytes for partial match
+            if (m_audio_buffer.size() > 7) {
+                m_audio_buffer.erase(m_audio_buffer.begin(), m_audio_buffer.end() - 7);
+            }
+            break;
+        }
+
+        size_t header_idx = std::distance(m_audio_buffer.begin(), it);
+        size_t pure_frame_size = m_audio.block_align > 0 ? m_audio.block_align : 368;
+        size_t total_frame_bytes = 8 + pure_frame_size;
+
+        if (m_audio_buffer.size() - header_idx < total_frame_bytes) {
+            // Drop unaligned preceding bytes if any
+            if (header_idx > 0) {
+                m_audio_buffer.erase(m_audio_buffer.begin(), m_audio_buffer.begin() + header_idx);
+            }
+            break; // Wait for full frame data to arrive
+        }
+
+        // Extract pure ATRAC3plus payload (strip 8-byte Sony header)
+        const uint8_t* pure_atrac3p_data = m_audio_buffer.data() + header_idx + 8;
+
+        AVPacket* audio_pkt = av_packet_alloc();
+        audio_pkt->data = const_cast<uint8_t*>(pure_atrac3p_data);
+        audio_pkt->size = static_cast<int>(pure_frame_size);
+
+        if (avcodec_send_packet(m_audio.codec_ctx, audio_pkt) >= 0) {
+            while (avcodec_receive_frame(m_audio.codec_ctx, audio_frame) >= 0) {
+                audio_frames_decoded++;
+            }
+        }
+
+        av_packet_free(&audio_pkt);
+
+        // Erase processed frame from buffer
+        m_audio_buffer.erase(m_audio_buffer.begin(), m_audio_buffer.begin() + header_idx + total_frame_bytes);
+    }
 }
 
 bool Decoder::test_decode(int max_frames, const std::string& dump_frame_path) {
-    if (!m_video.codec_ctx) return false;
+    if (!m_video.codec_ctx && !m_audio.codec_ctx) return false;
 
     avio_flush(m_avio_ctx);
     avio_seek(m_avio_ctx, 0, SEEK_SET);
-    av_seek_frame(m_fmt_ctx, m_video.stream_index, 0, AVSEEK_FLAG_BACKWARD);
+
+    int primary_index = m_video.stream_index != -1 ? m_video.stream_index : m_audio.stream_index;
+    av_seek_frame(m_fmt_ctx, primary_index, 0, AVSEEK_FLAG_BACKWARD);
 
     AVPacket* pkt = av_packet_alloc();
-    AVFrame* frame = av_frame_alloc();
-    int decoded_frames = 0;
+    AVFrame* video_frame = av_frame_alloc();
+    AVFrame* audio_frame = av_frame_alloc();
+    int decoded_video_frames = 0;
+    int decoded_audio_frames = 0;
+
+    m_audio_buffer.clear();
 
     while (av_read_frame(m_fmt_ctx, pkt) >= 0) {
-        if (pkt->stream_index == m_video.stream_index) {
+        if (m_video.stream_index != -1 && pkt->stream_index == m_video.stream_index) {
             if (avcodec_send_packet(m_video.codec_ctx, pkt) >= 0) {
-                while (avcodec_receive_frame(m_video.codec_ctx, frame) >= 0) {
-                    decoded_frames++;
-                    if (decoded_frames == 1) {
-                        save_ppm(frame, m_video.codec_ctx->width, m_video.codec_ctx->height, dump_frame_path);
+                while (avcodec_receive_frame(m_video.codec_ctx, video_frame) >= 0) {
+                    decoded_video_frames++;
+                    if (decoded_video_frames == 1) {
+                        save_ppm(video_frame, m_video.codec_ctx->width, m_video.codec_ctx->height, dump_frame_path);
                     }
-                    if (decoded_frames >= max_frames) break;
+                    if (decoded_video_frames >= max_frames) break;
                 }
             }
+        } else if (m_audio.stream_index != -1 && pkt->stream_index == m_audio.stream_index) {
+            process_audio_packet(pkt, audio_frame, decoded_audio_frames);
         }
         av_packet_unref(pkt);
-        if (decoded_frames >= max_frames) break;
+        if (m_video.stream_index != -1 && decoded_video_frames >= max_frames) break;
     }
 
-    av_frame_free(&frame);
+    if (decoded_audio_frames > 0) {
+        std::cout << "[+] Decoded " << decoded_audio_frames << " audio frames in memory.\n";
+    }
+
+    av_frame_free(&audio_frame);
+    av_frame_free(&video_frame);
     av_packet_free(&pkt);
-    return decoded_frames > 0;
+    return (m_video.stream_index != -1 ? decoded_video_frames > 0 : decoded_audio_frames > 0);
 }
 
 void Decoder::save_ppm(AVFrame* frame, int width, int height, const std::string& filename) {
@@ -153,6 +307,7 @@ void Decoder::save_ppm(AVFrame* frame, int width, int height, const std::string&
 }
 
 void Decoder::close() {
+    m_audio_buffer.clear();
     if (m_video.codec_ctx) { avcodec_free_context(&m_video.codec_ctx); m_video = {}; }
     if (m_audio.codec_ctx) { avcodec_free_context(&m_audio.codec_ctx); m_audio = {}; }
     if (m_fmt_ctx) { avformat_close_input(&m_fmt_ctx); m_fmt_ctx = nullptr; }

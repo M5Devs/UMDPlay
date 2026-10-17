@@ -41,6 +41,26 @@ target_link_libraries(umdplay PRIVATE
 
 target_compile_options(umdplay PRIVATE -Wall -Wextra -O2)
 
+enable_testing()
+
+add_executable(test_audio_decoder
+    tests/test_audio_decoder.cpp
+    src/iso_reader.cpp
+    src/decoder.cpp
+)
+
+target_link_libraries(test_audio_decoder PRIVATE
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+    ${SWSCALE_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+)
+
+target_compile_options(test_audio_decoder PRIVATE -Wall -Wextra -O2)
+
+add_test(NAME test_audio_decoder COMMAND test_audio_decoder)
+
 install(TARGETS umdplay DESTINATION bin)
 
 message(STATUS "UMDPlay ${PROJECT_VERSION} — Ready for ISO playback")
