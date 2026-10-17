@@ -30,7 +30,7 @@ int Decoder::read_packet(void* opaque, uint8_t* buf, int buf_size) {
     return static_cast<int>(bytes_read);
 }
 
-int Decoder::seek_packet(void* opaque, int64_t offset, int whence) {
+int64_t Decoder::seek_packet(void* opaque, int64_t offset, int whence) {
     auto* io = static_cast<StreamIoState*>(opaque);
     if (!io->iso_file.is_open()) return -1;
 
@@ -99,39 +99,25 @@ bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
     return (m_video.stream_index != -1);
 }
 
-bool Decoder::test_decode(int max_frames, const std::string& /*unused*/) {
+bool Decoder::test_decode(int max_frames, const std::string& dump_frame_path) {
     if (!m_video.codec_ctx) return false;
 
-    // 🔥 القفزة لنص الفيلم (500 ميجابايت من البداية) 🔥
-    uint64_t jump_offset = 500ULL * 1024 * 1024;
-    if (jump_offset < m_io.file_size) {
-        m_io.cursor = jump_offset;
-        avio_flush(m_avio_ctx);
-        avio_seek(m_avio_ctx, jump_offset, SEEK_SET);
-        avcodec_flush_buffers(m_video.codec_ctx);
-    }
+    avio_flush(m_avio_ctx);
+    avio_seek(m_avio_ctx, 0, SEEK_SET);
+    av_seek_frame(m_fmt_ctx, m_video.stream_index, 0, AVSEEK_FLAG_BACKWARD);
 
     AVPacket* pkt = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
     int decoded_frames = 0;
-
-    std::cout << "[*] Demuxing from middle offset (seeking keyframe)..." << std::endl;
 
     while (av_read_frame(m_fmt_ctx, pkt) >= 0) {
         if (pkt->stream_index == m_video.stream_index) {
             if (avcodec_send_packet(m_video.codec_ctx, pkt) >= 0) {
                 while (avcodec_receive_frame(m_video.codec_ctx, frame) >= 0) {
                     decoded_frames++;
-
-                    // حفظ فريم كل 10 فريمات
-                    if (decoded_frames % 10 == 0 || decoded_frames == 1) {
-                        std::ostringstream filename;
-                        filename << "concert_frame_" << decoded_frames << ".ppm";
-                        save_ppm(frame, m_video.codec_ctx->width, m_video.codec_ctx->height, filename.str());
-                        std::cout << "[+] 🌟 Captured Concert Frame: " << filename.str() 
-                                  << " (Resolution: " << frame->width << "x" << frame->height << ")" << std::endl;
+                    if (decoded_frames == 1) {
+                        save_ppm(frame, m_video.codec_ctx->width, m_video.codec_ctx->height, dump_frame_path);
                     }
-
                     if (decoded_frames >= max_frames) break;
                 }
             }
@@ -147,4 +133,29 @@ bool Decoder::test_decode(int max_frames, const std::string& /*unused*/) {
 
 void Decoder::save_ppm(AVFrame* frame, int width, int height, const std::string& filename) {
     SwsContext* sws = sws_getContext(
-        width, height, (AVPix
+        width, height, static_cast<AVPixelFormat>(frame->format),
+        width, height, AV_PIX_FMT_RGB24,
+        SWS_BILINEAR, nullptr, nullptr, nullptr
+    );
+    if (!sws) return;
+
+    std::vector<uint8_t> rgb_buffer(width * height * 3);
+    uint8_t* dst_data[1] = { rgb_buffer.data() };
+    int dst_linesize[1] = { 3 * width };
+
+    sws_scale(sws, frame->data, frame->linesize, 0, height, dst_data, dst_linesize);
+    sws_freeContext(sws);
+
+    std::ofstream out(filename, std::ios::binary);
+    if (!out) return;
+    out << "P6\n" << width << " " << height << "\n255\n";
+    out.write(reinterpret_cast<char*>(rgb_buffer.data()), rgb_buffer.size());
+}
+
+void Decoder::close() {
+    if (m_video.codec_ctx) { avcodec_free_context(&m_video.codec_ctx); m_video = {}; }
+    if (m_audio.codec_ctx) { avcodec_free_context(&m_audio.codec_ctx); m_audio = {}; }
+    if (m_fmt_ctx) { avformat_close_input(&m_fmt_ctx); m_fmt_ctx = nullptr; }
+    if (m_avio_ctx) { av_freep(&m_avio_ctx->buffer); avio_context_free(&m_avio_ctx); }
+    if (m_io.iso_file.is_open()) m_io.iso_file.close();
+}
