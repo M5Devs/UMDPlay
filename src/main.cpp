@@ -1,85 +1,31 @@
 #include "iso_reader.h"
+#include "decoder.h"
 #include <iostream>
-#include <iomanip>
-#include <string>
 
-static void print_usage(const char* prog) {
-    std::cout << "Usage:\n"
-              << "  " << prog << " <iso_path>              -- list stream files\n"
-              << "  " << prog << " <iso_path> --extract    -- extract .MPS to ./mps_output/\n"
-              << "  " << prog << " <iso_path> --dump N     -- hex dump first N bytes of stream N\n";
-}
-
-int main(int argc, char* argv[]) {
-    std::cout << "\n";
-    std::cout << "  ██╗   ██╗███╗   ███╗██████╗ ██╗   ██╗██████╗ ██╗      █████╗ ██╗   ██╗\n";
-    std::cout << "  ██║   ██║████╗ ████║██╔══██╗██║   ██║██╔══██╗██║     ██╔══██╗╚██╗ ██╔╝\n";
-    std::cout << "  ██║   ██║██╔████╔██║██║  ██║██║   ██║██████╔╝██║     ███████║ ╚████╔╝ \n";
-    std::cout << "  ██║   ██║██║╚██╔╝██║██║  ██║╚██╗ ██╔╝██╔═══╝ ██║     ██╔══██║  ╚██╔╝  \n";
-    std::cout << "  ╚██████╔╝██║ ╚═╝ ██║██████╔╝ ╚████╔╝ ██║     ███████╗██║  ██║   ██║   \n";
-    std::cout << "   ╚═════╝ ╚═╝     ╚═╝╚═════╝   ╚═══╝  ╚═╝     ╚══════╝╚═╝  ╚═╝   ╚═╝  \n";
-    std::cout << "  UMD Video Player — Phase 1 ISO Parser  |  M5Dev  |  GPL v2\n\n";
-
-    if (argc < 2) {
-        print_usage(argv[0]);
-        return 1;
-    }
-
-    std::string iso_path = argv[1];
-    std::string mode     = (argc >= 3) ? argv[2] : "";
+int main(int argc, char** argv) {
+    std::string iso_path = "/content/miku_umd.iso";
+    if (argc > 1) iso_path = argv[1];
 
     IsoReader reader(iso_path);
-    if (!reader.open()) {
-        std::cerr << "\n❌ Failed to parse ISO.\n";
-        return 1;
-    }
+    if (!reader.open()) return 1;
 
     auto entries = reader.get_mps_entries();
-
-    // ── List mode (default) ──────────────────────────────────────────────────
-    std::cout << "\n📋 Stream Files in UMD_VIDEO/STREAM/:\n";
-    std::cout << std::left
-              << std::setw(4)  << "#"
-              << std::setw(16) << "Name"
-              << std::setw(10) << "LBA"
-              << std::setw(16) << "Offset (hex)"
-              << "~Size\n";
-    std::cout << std::string(58, '-') << "\n";
-
-    for (size_t i = 0; i < entries.size(); ++i) {
-        const auto& e = entries[i];
-        std::cout << std::setw(4)  << i
-                  << std::setw(16) << e.name
-                  << std::setw(10) << e.lba
-                  << "0x" << std::hex << std::setw(10) << std::setfill('0')
-                  << (static_cast<uint64_t>(e.lba) * UMD_SECTOR_SIZE)
-                  << std::dec << std::setfill(' ')
-                  << "  ~" << e.size_bytes / 1048576 << " MB\n";
-    }
-
-    // ── Extract mode ─────────────────────────────────────────────────────────
-    if (mode == "--extract") {
-        std::string out_dir = "mps_output";
-        std::cout << "\n💾 Extracting to ./" << out_dir << "/\n";
-        // Note: create the directory before running (mkdir mps_output)
-        reader.extract_all(out_dir);
-    }
-
-    // ── Dump mode ─────────────────────────────────────────────────────────────
-    if (mode == "--dump" && argc >= 4) {
-        int idx = std::stoi(argv[3]);
-        if (idx >= 0 && static_cast<size_t>(idx) < entries.size()) {
-            reader.dump_mps_header(entries[idx], 128);
-        } else {
-            std::cerr << "❌ Invalid stream index: " << idx << "\n";
+    const MpsEntry* main_feature = nullptr;
+    for (const auto& e : entries) {
+        if (!main_feature || e.size_bytes > main_feature->size_bytes) {
+            main_feature = &e;
         }
     }
 
-    // ── Always dump first entry header for verification ───────────────────────
-    if (mode.empty() && !entries.empty()) {
-        reader.dump_mps_header(entries[0], 64);
-    }
+    std::cout << "[*] Main Feature: " << main_feature->name 
+              << " (" << main_feature->size_bytes / (1024*1024) << " MB)" << std::endl;
 
-    std::cout << "\n✅ Phase 1 complete — ready for Phase 2 (FFmpeg decoder)\n\n";
+    Decoder decoder;
+    if (!decoder.open_stream(iso_path, *main_feature)) return 1;
+
+    // هننط لـ 500 ميجابايت في قلب الحفلة!
+    std::cout << "[*] 🚀 Jumping to ~500 MB (Right into the middle of the concert!)..." << std::endl;
+    decoder.test_decode(120);
+
     return 0;
 }

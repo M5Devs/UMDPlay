@@ -1,12 +1,28 @@
+# Binaries & Builds
 build/
 bin/
 *.o
 *.a
+*.so
+umdvplay_test
+
+# Media & Dumps
 *.iso
-mps_output/
+*.mps
+*.pmf
+*.clp
+*.rco
+*.vbo
+*.ppm
+*.png
+*.gif
+*.wav
+*.bin
+*.oma
+*.at3
+
+# IDE & OS files
 .DS_Store
-*.user
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-Makefile
+.vscode/
+.idea/
+*.swp
