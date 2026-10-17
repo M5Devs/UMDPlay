@@ -1,4 +1,4 @@
-# UMDVPlay (UMD Video Player)
+# UMDPlay (UMD Video Player)
 
 ![License: GPL v2](https://img.shields.io/badge/License-GPLv2-blue.svg)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)
