@@ -51,7 +51,7 @@ Offset             Size    Field
 - **Audio Track:** ATRAC3plus packed inside **Private Stream 1 (`0x000001BD`)**
 
 ### In-Memory Streaming (Phase 2 Solution)
-To avoid extracting gigabytes of data to disk, `UMDVPlay` feeds raw sector streams directly into FFmpeg via a custom `AVIOContext` with seekable callbacks:
+To avoid extracting gigabytes of data to disk, `UMDPlay` feeds raw sector streams directly into FFmpeg via a custom `AVIOContext` with seekable callbacks:
 `Base_Byte_Offset = entry.lba * 2048`.
 
 ---
