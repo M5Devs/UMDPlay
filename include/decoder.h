@@ -23,6 +23,13 @@ struct StreamInfo {
     int             block_align  = 0;
 };
 
+enum class FrameType {
+    None,
+    Video,
+    Audio,
+    Eof
+};
+
 class Decoder {
 public:
     Decoder();
@@ -33,8 +40,15 @@ public:
 
     bool test_decode(int max_frames = 100, const std::string& dump_frame_path = "output_frame.ppm");
 
+    // Read next decoded frame or audio packet chunk
+    FrameType read_frame(AVFrame* video_frame, std::vector<uint8_t>& audio_pcm);
+
+    // Seek relative in seconds (e.g., +5.0 or -5.0)
+    bool seek_relative(double seconds);
+
     bool has_video() const { return m_video.stream_index != -1; }
     bool has_audio() const { return m_audio.stream_index != -1; }
+    double get_fps() const { return m_fps; }
 
 private:
     struct StreamIoState {
@@ -47,7 +61,7 @@ private:
     static int     read_packet(void* opaque, uint8_t* buf, int buf_size);
     static int64_t seek_packet(void* opaque, int64_t offset, int whence);
 
-    void process_audio_packet(AVPacket* pkt, AVFrame* audio_frame, int& audio_frames_decoded);
+    void process_audio_packet(AVPacket* pkt, AVFrame* audio_frame, std::vector<uint8_t>* out_pcm = nullptr);
 
     StreamIoState    m_io;
     uint8_t*         m_avio_buffer = nullptr;
@@ -57,6 +71,11 @@ private:
     StreamInfo       m_video;
     StreamInfo       m_audio;
     std::vector<uint8_t> m_audio_buffer;
+
+    SwrContext*      m_swr_ctx     = nullptr;
+    AVFrame*         m_temp_audio_frame = nullptr;
+    AVPacket*        m_demux_pkt   = nullptr;
+    double           m_fps         = 29.97;
 
     static void save_ppm(AVFrame* frame, int width, int height, const std::string& filename);
 };

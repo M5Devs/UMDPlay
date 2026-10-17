@@ -93,6 +93,12 @@ bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
                 m_video.codec_ctx = avcodec_alloc_context3(decoder);
                 avcodec_parameters_to_context(m_video.codec_ctx, codecpar);
                 avcodec_open2(m_video.codec_ctx, decoder, nullptr);
+
+                if (st->avg_frame_rate.den > 0 && st->avg_frame_rate.num > 0) {
+                    m_fps = av_q2d(st->avg_frame_rate);
+                } else if (st->r_frame_rate.den > 0 && st->r_frame_rate.num > 0) {
+                    m_fps = av_q2d(st->r_frame_rate);
+                }
             }
         } else if ((codecpar->codec_type == AVMEDIA_TYPE_AUDIO || st->id == 0x1BD || codecpar->codec_id == AV_CODEC_ID_ATRAC3P) && m_audio.stream_index == -1) {
             m_audio.stream_index = i;
@@ -165,6 +171,21 @@ bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
             if (avcodec_open2(m_audio.codec_ctx, audio_decoder, nullptr) < 0) {
                 avcodec_free_context(&m_audio.codec_ctx);
                 m_audio.stream_index = -1;
+            } else {
+                // Initialize SwrContext for audio resampling (FLTP -> S16 44100Hz stereo)
+                swr_alloc_set_opts2(
+                    &m_swr_ctx,
+                    &m_audio.codec_ctx->ch_layout,
+                    AV_SAMPLE_FMT_S16,
+                    44100,
+                    &m_audio.codec_ctx->ch_layout,
+                    m_audio.codec_ctx->sample_fmt,
+                    m_audio.codec_ctx->sample_rate,
+                    0, nullptr
+                );
+                if (m_swr_ctx) {
+                    swr_init(m_swr_ctx);
+                }
             }
         } else {
             m_audio.stream_index = -1;
@@ -175,33 +196,29 @@ bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
         avio_seek(m_avio_ctx, 0, SEEK_SET);
     }
 
+    m_temp_audio_frame = av_frame_alloc();
+    m_demux_pkt = av_packet_alloc();
+
     return (m_video.stream_index != -1 || m_audio.stream_index != -1);
 }
 
-void Decoder::process_audio_packet(AVPacket* pkt, AVFrame* audio_frame, int& audio_frames_decoded) {
+void Decoder::process_audio_packet(AVPacket* pkt, AVFrame* audio_frame, std::vector<uint8_t>* out_pcm) {
     if (!m_audio.codec_ctx || pkt->size <= 0) return;
 
     const uint8_t* data = pkt->data;
     int size = pkt->size;
 
-    // 1. Packet Detection & Filtering (Private Stream 1)
-    // Audio packets payload starts with stream_id == 0x00 for Primary Audio Track
     if (size > 4 && data[0] == 0x00) {
-        // Skip 4-byte PES audio header (byte 0..1 stream/substream, byte 2..3 access unit ptr)
         data += 4;
         size -= 4;
     }
 
-    // Append to continuous audio buffer
     m_audio_buffer.insert(m_audio_buffer.end(), data, data + size);
 
-    // Parse frames from buffer using 8-byte frame header and block_align
     while (m_audio_buffer.size() >= 8) {
-        // Find Sony header
         auto it = std::search(m_audio_buffer.begin(), m_audio_buffer.end(),
                               SONY_FRAME_HEADER, SONY_FRAME_HEADER + 8);
         if (it == m_audio_buffer.end()) {
-            // Header not found yet, keep last 7 bytes for partial match
             if (m_audio_buffer.size() > 7) {
                 m_audio_buffer.erase(m_audio_buffer.begin(), m_audio_buffer.end() - 7);
             }
@@ -213,14 +230,12 @@ void Decoder::process_audio_packet(AVPacket* pkt, AVFrame* audio_frame, int& aud
         size_t total_frame_bytes = 8 + pure_frame_size;
 
         if (m_audio_buffer.size() - header_idx < total_frame_bytes) {
-            // Drop unaligned preceding bytes if any
             if (header_idx > 0) {
                 m_audio_buffer.erase(m_audio_buffer.begin(), m_audio_buffer.begin() + header_idx);
             }
-            break; // Wait for full frame data to arrive
+            break;
         }
 
-        // Extract pure ATRAC3plus payload (strip 8-byte Sony header)
         const uint8_t* pure_atrac3p_data = m_audio_buffer.data() + header_idx + 8;
 
         AVPacket* audio_pkt = av_packet_alloc();
@@ -229,15 +244,98 @@ void Decoder::process_audio_packet(AVPacket* pkt, AVFrame* audio_frame, int& aud
 
         if (avcodec_send_packet(m_audio.codec_ctx, audio_pkt) >= 0) {
             while (avcodec_receive_frame(m_audio.codec_ctx, audio_frame) >= 0) {
-                audio_frames_decoded++;
+                if (out_pcm && m_swr_ctx) {
+                    int out_samples = audio_frame->nb_samples;
+                    int dst_bufsize = av_samples_get_buffer_size(nullptr, 2, out_samples, AV_SAMPLE_FMT_S16, 0);
+                    if (dst_bufsize > 0) {
+                        size_t orig_size = out_pcm->size();
+                        out_pcm->resize(orig_size + dst_bufsize);
+                        uint8_t* out_ptr = out_pcm->data() + orig_size;
+
+                        const uint8_t* in_data[AV_NUM_DATA_POINTERS] = { nullptr };
+                        for (int i = 0; i < AV_NUM_DATA_POINTERS; i++) {
+                            in_data[i] = audio_frame->data[i];
+                        }
+
+                        swr_convert(m_swr_ctx, &out_ptr, out_samples, in_data, audio_frame->nb_samples);
+                    }
+                }
             }
         }
 
         av_packet_free(&audio_pkt);
-
-        // Erase processed frame from buffer
         m_audio_buffer.erase(m_audio_buffer.begin(), m_audio_buffer.begin() + header_idx + total_frame_bytes);
     }
+}
+
+FrameType Decoder::read_frame(AVFrame* video_frame, std::vector<uint8_t>& audio_pcm) {
+    if (!m_fmt_ctx) return FrameType::Eof;
+
+    audio_pcm.clear();
+
+    while (true) {
+        // First check if video codec context has any buffered frames available
+        if (m_video.codec_ctx && video_frame) {
+            if (avcodec_receive_frame(m_video.codec_ctx, video_frame) >= 0) {
+                return FrameType::Video;
+            }
+        }
+
+        int ret = av_read_frame(m_fmt_ctx, m_demux_pkt);
+        if (ret < 0) {
+            return FrameType::Eof;
+        }
+
+        if (m_video.stream_index != -1 && m_demux_pkt->stream_index == m_video.stream_index) {
+            if (avcodec_send_packet(m_video.codec_ctx, m_demux_pkt) >= 0) {
+                av_packet_unref(m_demux_pkt);
+                if (video_frame && avcodec_receive_frame(m_video.codec_ctx, video_frame) >= 0) {
+                    return FrameType::Video;
+                }
+            } else {
+                av_packet_unref(m_demux_pkt);
+            }
+        } else if (m_audio.stream_index != -1 && m_demux_pkt->stream_index == m_audio.stream_index) {
+            process_audio_packet(m_demux_pkt, m_temp_audio_frame, &audio_pcm);
+            av_packet_unref(m_demux_pkt);
+            if (!audio_pcm.empty()) {
+                return FrameType::Audio;
+            }
+        } else {
+            av_packet_unref(m_demux_pkt);
+        }
+    }
+}
+
+bool Decoder::seek_relative(double seconds) {
+    if (!m_fmt_ctx) return false;
+
+    int primary_stream = m_video.stream_index != -1 ? m_video.stream_index : m_audio.stream_index;
+    if (primary_stream == -1) return false;
+
+    AVStream* st = m_fmt_ctx->streams[primary_stream];
+
+    int64_t seek_offset = static_cast<int64_t>(seconds * AV_TIME_BASE);
+    int flags = seconds < 0 ? AVSEEK_FLAG_BACKWARD : 0;
+
+    if (m_video.codec_ctx) {
+        avcodec_flush_buffers(m_video.codec_ctx);
+    }
+    if (m_audio.codec_ctx) {
+        avcodec_flush_buffers(m_audio.codec_ctx);
+    }
+    m_audio_buffer.clear();
+
+    int ret = av_seek_frame(m_fmt_ctx, -1, seek_offset, flags);
+    if (ret < 0) {
+        ret = av_seek_frame(m_fmt_ctx, primary_stream, static_cast<int64_t>(seconds / av_q2d(st->time_base)), flags);
+    }
+
+    if (m_avio_ctx) {
+        avio_flush(m_avio_ctx);
+    }
+
+    return ret >= 0;
 }
 
 bool Decoder::test_decode(int max_frames, const std::string& dump_frame_path) {
@@ -269,7 +367,8 @@ bool Decoder::test_decode(int max_frames, const std::string& dump_frame_path) {
                 }
             }
         } else if (m_audio.stream_index != -1 && pkt->stream_index == m_audio.stream_index) {
-            process_audio_packet(pkt, audio_frame, decoded_audio_frames);
+            process_audio_packet(pkt, audio_frame, nullptr);
+            decoded_audio_frames++;
         }
         av_packet_unref(pkt);
         if (m_video.stream_index != -1 && decoded_video_frames >= max_frames) break;
@@ -308,6 +407,9 @@ void Decoder::save_ppm(AVFrame* frame, int width, int height, const std::string&
 
 void Decoder::close() {
     m_audio_buffer.clear();
+    if (m_swr_ctx) { swr_free(&m_swr_ctx); }
+    if (m_temp_audio_frame) { av_frame_free(&m_temp_audio_frame); }
+    if (m_demux_pkt) { av_packet_free(&m_demux_pkt); }
     if (m_video.codec_ctx) { avcodec_free_context(&m_video.codec_ctx); m_video = {}; }
     if (m_audio.codec_ctx) { avcodec_free_context(&m_audio.codec_ctx); m_audio = {}; }
     if (m_fmt_ctx) { avformat_close_input(&m_fmt_ctx); m_fmt_ctx = nullptr; }
