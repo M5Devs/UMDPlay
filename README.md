@@ -22,7 +22,7 @@ UMD Video discs use a specific filesystem structure rooted in the `UMD_VIDEO/` d
 - **ATRAC3plus**, **AC3**, or **LPCM** audio formats
 - Interactive menu overlays built on **`.RCO` / `.VBO`** assets
 
-**UMDVPlay** aims to bridge this gap by building a dedicated, efficient decoder from the ground up — in pure C++ with FFmpeg — heavily optimized to run even on low-spec legacy hardware.
+**UMDPlay** aims to bridge this gap by building a dedicated, efficient decoder from the ground up — in pure C++ with FFmpeg — heavily optimized to run even on low-spec legacy hardware.
 
 ---
 
@@ -48,7 +48,7 @@ UMD Video discs use a specific filesystem structure rooted in the `UMD_VIDEO/` d
 ## 📂 Project Structure
 
 ```text
-UMDVPlay/
+UMDPlay/
 ├── CMakeLists.txt              # Core build configuration
 ├── docs/
 │   └── ARCHITECTURE.md         # Technical breakdown of the decoding pipeline
