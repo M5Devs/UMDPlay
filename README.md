@@ -85,9 +85,12 @@ UMDPlay/
 
 ---
 
-## 🖼️ Screenshots
+## 🖼️ Verified Decoded Frames (Proof of Concept)
 
-> 🚧 Coming soon — check back after Phase 3!
+| Hatsune Miku: Project DIVA (39's Giving Day) | Family Guy: Blue Harvest (Star Wars Parody) |
+|:---:|:---:|
+| ![Miku](screenshots/miku1.png) | ![Family Guy](screenshots/fg1.png) |
+| *Japanese UMD Video (Concert)* | *US Commercial UMD Video (Hollywood)* |
 
 ---
 
