@@ -3,6 +3,7 @@
 #include <SDL2/SDL.h>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -28,6 +29,18 @@ public:
     void update_video_texture(AVFrame* frame);
     void queue_audio(const uint8_t* data, uint32_t len);
 
+    // Window display mode. toggle_fullscreen() flips between a windowed frame
+    // and SDL_WINDOW_FULLSCREEN_DESKTOP and returns the new fullscreen state.
+    bool toggle_fullscreen();
+    void set_fullscreen(bool on);
+    bool is_fullscreen() const { return m_fullscreen; }
+
+    // Playback gain applied in queue_audio(). volume is clamped to [0, 1].
+    void  set_volume(float v);
+    float volume() const { return m_volume; }
+    void  set_muted(bool m) { m_muted = m; }
+    bool  muted() const { return m_muted; }
+
     // Legacy single-shot present used by simple callers.
     void render_video_frame(AVFrame* frame);
 
@@ -51,6 +64,11 @@ private:
 
     int m_texture_width = 0;
     int m_texture_height = 0;
+
+    bool  m_fullscreen = false;
+    float m_volume = 1.0f;
+    bool  m_muted = false;
+    std::vector<uint8_t> m_audio_scratch;
 
     void update_texture_size(int width, int height);
 };

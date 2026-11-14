@@ -3,15 +3,20 @@
 #include "ui_manager.h"
 #include "wmc_ui.h"
 #include "clip_export.h"
+#include "recent.h"
 
 #include "stb_image_write.h"   // declarations only (impl is in stb_impl.cpp)
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -26,16 +31,20 @@ struct Options {
     bool        probe_only    = false;
     bool        autoplay      = false;   // --play: skip the Hub, start the main stream
     bool        demo          = false;   // --demo: render a synthetic hub, no ISO
+    bool        fullscreen    = false;   // --fullscreen: start in fullscreen
+    std::string start_strip;             // --strip recent|browse|settings
 };
 
 void print_usage() {
     std::cout <<
-        "Usage: umdplay <path_to_umd_video.iso> [options]\n"
+        "Usage: umdplay [path_to_umd_video.iso] [options]\n"
         "  --play                 start the main feature immediately\n"
         "  --export-clip <mp4>    decode a clip to MP4 (H.264/AAC) and exit\n"
         "  --clip-seconds <n>     clip length in seconds (default 12)\n"
         "  --screenshot <png>     render a frame, write a PNG, then exit\n"
         "  --start <seconds>      start at this offset\n"
+        "  --fullscreen           start in fullscreen (F11 / Alt+Enter toggles)\n"
+        "  --strip <name>         start on a hub strip: recent|browse|settings\n"
         "  --probe                print stream/metadata info and exit\n"
         "  --demo                 render the hub with synthetic data (no ISO)\n";
 }
@@ -57,6 +66,10 @@ bool parse_args(int argc, char** argv, Options& opt) {
             opt.autoplay = true;
         } else if (a == "--demo") {
             opt.demo = true;
+        } else if (a == "--fullscreen") {
+            opt.fullscreen = true;
+        } else if (a == "--strip" && i + 1 < argc) {
+            opt.start_strip = argv[++i];
         } else if (a == "-h" || a == "--help") {
             print_usage();
             return false;
@@ -93,6 +106,98 @@ void push_key(SDL_Keycode sym, bool down) {
     SDL_PushEvent(&e);
 }
 
+// A disc in the library: parsed metadata plus the raw MPS entries needed to
+// open a stream later.
+struct LibraryItem {
+    DiscItem              disc;
+    std::vector<MpsEntry> entries;
+};
+
+// Parse an ISO into a LibraryItem. Textures are created later by the caller.
+bool load_iso(const std::string& path, LibraryItem& out) {
+    IsoReader reader(path);
+    if (!reader.open()) return false;
+
+    auto entries = reader.get_mps_entries();
+    if (entries.empty()) return false;
+
+    DiscItem& d = out.disc;
+    d.iso_path = path;
+    d.title    = reader.param().title;
+    d.disc_id  = reader.param().disc_id;
+    d.category = reader.param().category;
+
+    uint32_t max_size = 0;
+    for (const auto& e : entries) max_size = std::max(max_size, e.size_bytes);
+    for (const auto& e : entries) {
+        StreamItem s;
+        s.name       = e.name;
+        s.size_bytes = e.size_bytes;
+        s.is_main    = (e.size_bytes == max_size);
+        d.streams.push_back(s);
+    }
+    out.entries = std::move(entries);
+    return true;
+}
+
+// Load ICON0.PNG / PIC1.PNG for a disc into SDL textures via the WMC context.
+void load_disc_textures(const std::string& iso_path, DiscItem& disc, WmcUi& wmc) {
+    IsoReader reader(iso_path);
+    if (!reader.open()) return;
+    if (reader.has_metadata("ICON0.PNG")) {
+        auto bytes = reader.read_metadata("ICON0.PNG");
+        if (!bytes.empty()) disc.icon = wmc.texture_from_png(bytes);
+    }
+    if (reader.has_metadata("PIC1.PNG")) {
+        auto bytes = reader.read_metadata("PIC1.PNG");
+        if (!bytes.empty()) disc.pic1 = wmc.texture_from_png(bytes);
+    }
+}
+
+void destroy_disc_textures(DiscItem& d) {
+    if (d.icon) { SDL_DestroyTexture(d.icon); d.icon = nullptr; }
+    if (d.pic1) { SDL_DestroyTexture(d.pic1); d.pic1 = nullptr; }
+}
+
+std::string parent_dir(const std::string& dir) {
+    std::error_code ec;
+    fs::path p = fs::weakly_canonical(dir, ec);
+    if (ec || !p.has_parent_path() || p.parent_path() == p) return dir;
+    return p.parent_path().string();
+}
+
+// Build the Browse System listing: parent entry, then sub-folders, then *.iso.
+void build_browse(const std::string& dir, std::vector<BrowseEntry>& out) {
+    out.clear();
+
+    const fs::path p(dir);
+    const std::string parent = parent_dir(dir);
+    if (parent != dir) out.push_back({".. (up one level)", parent, true, false});
+
+    std::vector<BrowseEntry> dirs, isos;
+    std::error_code ec;
+    for (const auto& de : fs::directory_iterator(p, fs::directory_options::skip_permission_denied, ec)) {
+        if (ec) break;
+        const std::string name = de.path().filename().string();
+        if (!name.empty() && name[0] == '.') continue;
+        std::error_code tec;
+        if (de.is_directory(tec) && !tec) {
+            dirs.push_back({name, de.path().string(), true, false});
+        } else {
+            std::string lower = name;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (lower.size() > 4 && lower.substr(lower.size() - 4) == ".iso")
+                isos.push_back({name, de.path().string(), false, true});
+        }
+    }
+    auto by_name = [](const BrowseEntry& a, const BrowseEntry& b) { return a.name < b.name; };
+    std::sort(dirs.begin(), dirs.end(), by_name);
+    std::sort(isos.begin(), isos.end(), by_name);
+    out.insert(out.end(), dirs.begin(), dirs.end());
+    out.insert(out.end(), isos.begin(), isos.end());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -107,17 +212,17 @@ int main(int argc, char** argv) {
 
     std::cout << "=== UMDPlay Preservation Engine (Phase 3 - WMC UI) ===\n";
 
-    DiscItem disc;
-    std::vector<MpsEntry> entries;
-    std::vector<uint8_t> icon_png, pic1_png;
-    bool has_iso = false;
+    // --- Build the initial library -------------------------------------------
+    std::vector<LibraryItem> recent_items;
+    LibraryItem active;              // the disc currently selected / playing
+    bool has_active = false;
 
-    // --demo builds a synthetic disc so the UI can be exercised without an ISO
-    // (keeps CI free of copyrighted assets).
     if (opt.demo) {
-        disc.title    = "\u30c7\u30e2 UMD Video (Demo)";
-        disc.disc_id  = "UMDPLAY-DEMO";
-        disc.category = "UMD_VIDEO";
+        DiscItem d;
+        d.title    = "\u30c7\u30e2 UMD Video (Demo)";
+        d.disc_id  = "UMDPLAY-DEMO";
+        d.category = "UMD_VIDEO";
+        d.is_demo  = true;
         const char* names[] = {"00001.MPS", "00002.MPS", "00003.MPS"};
         const uint32_t sizes[] = {1500000000u, 4000000u, 1200000u};
         for (int i = 0; i < 3; ++i) {
@@ -125,57 +230,49 @@ int main(int argc, char** argv) {
             s.name = names[i];
             s.size_bytes = sizes[i];
             s.is_main = (i == 0);
-            disc.streams.push_back(s);
+            d.streams.push_back(s);
         }
+        LibraryItem it;
+        it.disc = d;
+        recent_items.push_back(it);
+        active = it;
+        has_active = true;
     } else {
-        std::cout << "[*] Inspecting ISO: " << opt.iso_path << "\n";
-
-        IsoReader reader(opt.iso_path);
-        if (!reader.open()) {
-            std::cerr << "[-] Failed to read UMD Video filesystem!\n";
-            return 1;
+        // Restore previously opened discs from the recent list.
+        for (const auto& path : recent::load()) {
+            std::error_code ec;
+            if (!fs::exists(path, ec) || ec) continue;
+            LibraryItem it;
+            if (load_iso(path, it)) recent_items.push_back(std::move(it));
         }
 
-        entries = reader.get_mps_entries();
-        if (entries.empty()) {
-            std::cerr << "[-] No .MPS streams found!\n";
-            return 1;
+        if (!opt.iso_path.empty()) {
+            LibraryItem it;
+            std::cout << "[*] Inspecting ISO: " << opt.iso_path << "\n";
+            if (!load_iso(opt.iso_path, it)) {
+                std::cerr << "[-] Failed to read UMD Video filesystem!\n";
+                return 1;
+            }
+            active = it;
+            has_active = true;
         }
-
-        disc.iso_path = opt.iso_path;
-        disc.title    = reader.param().title;
-        disc.disc_id  = reader.param().disc_id;
-        disc.category = reader.param().category;
-
-        uint32_t max_size = 0;
-        for (const auto& e : entries) max_size = std::max(max_size, e.size_bytes);
-        for (const auto& e : entries) {
-            StreamItem s;
-            s.name       = e.name;
-            s.size_bytes = e.size_bytes;
-            s.is_main    = (e.size_bytes == max_size);
-            disc.streams.push_back(s);
-        }
-        if (reader.has_metadata("ICON0.PNG")) icon_png = reader.read_metadata("ICON0.PNG");
-        if (reader.has_metadata("PIC1.PNG"))  pic1_png = reader.read_metadata("PIC1.PNG");
-        has_iso = true;
     }
 
-    print_disc_summary(disc);
+    if (has_active) print_disc_summary(active.disc);
 
     // Headless clip export: no window needed, encode straight from the decoder.
     if (!opt.export_path.empty()) {
-        if (!has_iso || entries.empty()) {
+        if (!has_active || opt.demo || active.entries.empty()) {
             std::cerr << "[-] --export-clip needs a real ISO (not --demo).\n";
             return 1;
         }
-        MpsEntry main_entry = entries[0];
-        for (const auto& e : entries) {
+        MpsEntry main_entry = active.entries[0];
+        for (const auto& e : active.entries) {
             if (e.size_bytes > main_entry.size_bytes) main_entry = e;
         }
         std::cout << "[*] Exporting " << opt.clip_seconds << "s clip from "
                   << main_entry.name << " starting at " << opt.start_seconds << "s\n";
-        const bool ok = export_clip(opt.iso_path, main_entry, opt.start_seconds,
+        const bool ok = export_clip(active.disc.iso_path, main_entry, opt.start_seconds,
                                     opt.clip_seconds, opt.export_path);
         std::cout << (ok ? "[+] Clip written: " : "[-] Clip export failed: ")
                   << opt.export_path << "\n";
@@ -187,36 +284,83 @@ int main(int argc, char** argv) {
         std::cerr << "[-] Failed to initialize SDL window/renderer!\n";
         return 1;
     }
-
-    // Decode ICON0.PNG / PIC1.PNG into SDL textures via a temporary WMC context.
-    if (!icon_png.empty() || !pic1_png.empty()) {
-        WmcUi tex;
-        if (tex.init(ui.window(), ui.renderer(), disc.title)) {
-            if (!icon_png.empty()) disc.icon = tex.texture_from_png(icon_png);
-            if (!pic1_png.empty()) disc.pic1 = tex.texture_from_png(pic1_png);
-            tex.close();
-        }
-    }
-
-    if (opt.probe_only) {
-        ui.close();
-        return 0;
-    }
+    ui.set_fullscreen(opt.fullscreen);
 
     WmcUi wmc;
-    if (!wmc.init(ui.window(), ui.renderer(), disc.title)) {
+    std::string glyph_sample = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                               "0123456789 .,:;!?/()-+%[]()'\"&|\u2022\u2013\u2014";
+    for (const auto& it : recent_items) glyph_sample += it.disc.title + it.disc.disc_id;
+    if (has_active) glyph_sample += active.disc.title;
+
+    if (!wmc.init(ui.window(), ui.renderer(), glyph_sample)) {
         std::cerr << "[-] Failed to initialize WMC UI (ImGui)!\n";
         ui.close();
         return 1;
     }
 
-    std::vector<DiscItem> discs = { disc };
-    int selected_disc = 0;
-    int selected_stream = 0;
-    for (size_t i = 0; i < disc.streams.size(); ++i) {
-        if (disc.streams[i].is_main) { selected_stream = static_cast<int>(i); break; }
+    // Decode cover art. `recent_items` is the single owner of all textures;
+    // `active` is a metadata-only copy so nothing is freed twice.
+    for (auto& it : recent_items) {
+        if (!it.disc.iso_path.empty()) load_disc_textures(it.disc.iso_path, it.disc, wmc);
+    }
+    if (has_active && !active.disc.iso_path.empty()) {
+        recent::add(active.disc.iso_path);
+        int found = -1;
+        for (int i = 0; i < static_cast<int>(recent_items.size()); ++i)
+            if (recent_items[i].disc.iso_path == active.disc.iso_path) { found = i; break; }
+        if (found >= 0) {
+            LibraryItem ex = std::move(recent_items[found]);
+            recent_items.erase(recent_items.begin() + found);
+            recent_items.insert(recent_items.begin(), std::move(ex));
+        } else {
+            recent_items.insert(recent_items.begin(), active);
+            load_disc_textures(active.disc.iso_path, recent_items.front().disc, wmc);
+        }
+        active = recent_items.front();
+    }
+    active.disc.icon = nullptr;
+    active.disc.pic1 = nullptr;
+
+    if (opt.probe_only) {
+        for (auto& it : recent_items) destroy_disc_textures(it.disc);
+        wmc.close();
+        ui.close();
+        return 0;
     }
 
+    // --- Hub state ---
+    std::vector<DiscItem> recent_cards;
+    auto refresh_cards = [&]() {
+        recent_cards.clear();
+        for (const auto& it : recent_items) recent_cards.push_back(it.disc);
+    };
+    refresh_cards();
+
+    int recent_sel = 0;
+    int browse_sel = 0;
+    int action_sel = 0;
+    int extras_sel = 0;
+    int setting_sel = 0;
+    bool extras_open = false;
+
+    std::string browse_dir;
+    {
+        std::error_code ec;
+        if (has_active && !active.disc.iso_path.empty()) {
+            browse_dir = fs::path(active.disc.iso_path).parent_path().string();
+        }
+        if (browse_dir.empty()) browse_dir = fs::current_path(ec).string();
+        if (ec || browse_dir.empty()) browse_dir = ".";
+    }
+    std::vector<BrowseEntry> browse_entries;
+    build_browse(browse_dir, browse_entries);
+
+    HubMode strip = recent_cards.empty() ? HubMode::Browse : HubMode::Recent;
+    if (opt.start_strip == "browse") strip = HubMode::Browse;
+    else if (opt.start_strip == "settings") strip = HubMode::Settings;
+    else if (opt.start_strip == "recent") strip = HubMode::Recent;
+
+    // --- Playback state ---
     Mode mode = Mode::Hub;
     Decoder decoder;
     AVFrame* video_frame = av_frame_alloc();
@@ -230,6 +374,7 @@ int main(int argc, char** argv) {
     bool decoder_open = false;
     bool quit = false;
     int shot_countdown = -1;
+    int play_stream_index = 0;
 
     SDL_GameController* pad = nullptr;
     for (int i = 0; i < SDL_NumJoysticks(); ++i) {
@@ -243,16 +388,21 @@ int main(int argc, char** argv) {
         if (decoder_open) { decoder.close(); decoder_open = false; }
     };
 
-    auto open_stream = [&](const StreamItem& s) -> bool {
+    // Open a stream of the active disc (uses active.entries for the LBA).
+    auto open_stream = [&](int stream_idx) -> bool {
+        if (!has_active || opt.demo || active.entries.empty()) return false;
+        if (stream_idx < 0 || stream_idx >= static_cast<int>(active.disc.streams.size())) return false;
+        const StreamItem& s = active.disc.streams[stream_idx];
+
         MpsEntry e;
         e.name = s.name;
         e.size_bytes = s.size_bytes;
         e.lba = 0;
-        for (const auto& m : entries) {
+        for (const auto& m : active.entries) {
             if (m.name == s.name) { e.lba = m.lba; break; }
         }
         close_decoder();
-        if (!has_iso || !decoder.open_stream(opt.iso_path, e)) return false;
+        if (!decoder.open_stream(active.disc.iso_path, e)) return false;
         decoder_open = true;
         fps = decoder.get_fps();
         if (fps <= 0.0 || fps > 120.0) fps = 29.97;
@@ -261,13 +411,57 @@ int main(int argc, char** argv) {
         elapsed = 0.0;
         if (opt.start_seconds > 0.0) decoder.seek_relative(opt.start_seconds);
         last_frame_time = SDL_GetTicks();
+        play_stream_index = stream_idx;
         return true;
     };
 
-    if (opt.autoplay && !disc.streams.empty()) {
-        if (open_stream(disc.streams[selected_stream])) {
+    auto main_stream_index = [&]() -> int {
+        if (!has_active) return 0;
+        for (size_t i = 0; i < active.disc.streams.size(); ++i)
+            if (active.disc.streams[i].is_main) return static_cast<int>(i);
+        return 0;
+    };
+
+    // Open an ISO chosen from Recent / Browse: load it, add to Recent, show it.
+    auto open_iso_path = [&](const std::string& path) {
+        LibraryItem it;
+        if (!load_iso(path, it)) {
+            std::cerr << "[-] Failed to open ISO: " << path << "\n";
+            return;
+        }
+        recent::add(path);
+        print_disc_summary(it.disc);
+
+        // Reuse the existing library entry's textures if we already have them.
+        int found = -1;
+        for (int i = 0; i < static_cast<int>(recent_items.size()); ++i)
+            if (recent_items[i].disc.iso_path == path) { found = i; break; }
+        if (found >= 0) {
+            LibraryItem ex = std::move(recent_items[found]);
+            ex.disc.streams = it.disc.streams;   // refresh stream list
+            recent_items.erase(recent_items.begin() + found);
+            recent_items.insert(recent_items.begin(), std::move(ex));
+        } else {
+            recent_items.insert(recent_items.begin(), it);
+            load_disc_textures(path, recent_items.front().disc, wmc);
+        }
+        active = recent_items.front();
+        active.disc.icon = nullptr;
+        active.disc.pic1 = nullptr;
+        has_active = true;
+
+        refresh_cards();
+        recent_sel = 0;
+        action_sel = 0;
+        extras_open = false;
+        strip = HubMode::Recent;
+    };
+
+    if (opt.autoplay && has_active) {
+        const int idx = main_stream_index();
+        if (open_stream(idx)) {
             mode = Mode::Player;
-            std::cout << "[*] Autoplay: " << disc.streams[selected_stream].name << "\n";
+            std::cout << "[*] Autoplay: " << active.disc.streams[idx].name << "\n";
         }
     }
 
@@ -276,7 +470,12 @@ int main(int argc, char** argv) {
         while (SDL_PollEvent(&ev)) {
             wmc.process_event(ev);
             if (ev.type == SDL_QUIT) quit = true;
-            if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_q) quit = true;
+            if (ev.type == SDL_KEYDOWN) {
+                const SDL_Keycode k = ev.key.keysym.sym;
+                const bool alt = (ev.key.keysym.mod & KMOD_ALT) != 0;
+                if (k == SDLK_q && mode == Mode::Hub) quit = true;
+                if (k == SDLK_F11 || (k == SDLK_RETURN && alt)) ui.toggle_fullscreen();
+            }
             if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
                 switch (ev.cbutton.button) {
                     case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  push_key(SDLK_LEFT, true); break;
@@ -296,17 +495,52 @@ int main(int argc, char** argv) {
         WmcInput in;
 
         if (mode == Mode::Hub) {
-            in = wmc.render_hub(discs, selected_disc, selected_stream, now());
-            if (in.action == WmcAction::Play && !disc.streams.empty()) {
-                const StreamItem& s = disc.streams[selected_stream];
-                std::cout << "[*] Playing stream: " << s.name << "\n";
-                if (open_stream(s)) {
-                    mode = Mode::Player;
-                    paused = false;
-                    osd_visible = true;
-                } else {
-                    std::cerr << "[-] Failed to open stream " << s.name << "\n";
+            in = wmc.render_hub(strip, recent_cards, recent_sel,
+                                browse_entries, browse_sel, browse_dir,
+                                action_sel, extras_open, extras_sel, setting_sel,
+                                ui.is_fullscreen(), ui.volume(), ui.muted(), now());
+
+            switch (in.action) {
+                case WmcAction::OpenIso:
+                    open_iso_path(in.iso_path);
+                    break;
+                case WmcAction::BrowseEnter:
+                    browse_dir = in.iso_path;
+                    build_browse(browse_dir, browse_entries);
+                    browse_sel = 0;
+                    break;
+                case WmcAction::BrowseUp:
+                    browse_dir = parent_dir(browse_dir);
+                    build_browse(browse_dir, browse_entries);
+                    browse_sel = 0;
+                    break;
+                case WmcAction::Play: {
+                    const int idx = main_stream_index();
+                    std::cout << "[*] Playing main feature: " << active.disc.streams[idx].name << "\n";
+                    if (open_stream(idx)) { mode = Mode::Player; paused = false; osd_visible = true; }
+                    else std::cerr << "[-] Failed to open main stream\n";
+                    break;
                 }
+                case WmcAction::PlayStream:
+                    if (in.stream_index >= 0) {
+                        std::cout << "[*] Playing bonus stream: "
+                                  << active.disc.streams[in.stream_index].name << "\n";
+                        if (open_stream(in.stream_index)) { mode = Mode::Player; paused = false; osd_visible = true; }
+                    }
+                    break;
+                case WmcAction::ToggleFullscreen:
+                    ui.toggle_fullscreen();
+                    break;
+                case WmcAction::VolumeChanged:
+                    ui.set_volume(in.volume);
+                    break;
+                case WmcAction::MuteToggled:
+                    ui.set_muted(!ui.muted());
+                    break;
+                case WmcAction::Quit:
+                    quit = true;
+                    break;
+                default: break;
             }
         } else {
             if (!paused) {
@@ -332,9 +566,14 @@ int main(int argc, char** argv) {
                 SDL_Delay(10);
             }
 
+            const std::string sname =
+                (play_stream_index >= 0 &&
+                 play_stream_index < static_cast<int>(active.disc.streams.size()))
+                    ? active.disc.streams[play_stream_index].name
+                    : std::string("stream");
             in = wmc.render_player(ui.video_texture(), ui.video_width(), ui.video_height(),
-                                   disc, disc.streams[selected_stream].name,
-                                   paused, elapsed, total, osd_visible, now());
+                                   active.disc, sname, paused, elapsed, total, osd_visible,
+                                   ui.volume(), ui.muted(), ui.is_fullscreen(), now());
 
             switch (in.action) {
                 case WmcAction::TogglePause: paused = !paused; break;
@@ -349,6 +588,9 @@ int main(int argc, char** argv) {
                 case WmcAction::SeekTo:
                     decoder.seek_relative(in.seek_seconds - elapsed);
                     elapsed = in.seek_seconds;
+                    break;
+                case WmcAction::ToggleFullscreen:
+                    ui.toggle_fullscreen();
                     break;
                 case WmcAction::BackToHub:
                     mode = Mode::Hub;
@@ -386,6 +628,8 @@ int main(int argc, char** argv) {
         wmc.present();
     }
 
+    for (auto& it : recent_items) destroy_disc_textures(it.disc);
+    destroy_disc_textures(active.disc);
     if (pad) SDL_GameControllerClose(pad);
     av_frame_free(&video_frame);
     close_decoder();

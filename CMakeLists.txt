@@ -63,6 +63,7 @@ add_library(umdplay_core STATIC
     src/iso_reader.cpp
     src/param_sfo.cpp
     src/decoder.cpp
+    src/recent.cpp
 )
 target_link_libraries(umdplay_core PUBLIC
     ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES}
@@ -95,6 +96,14 @@ add_executable(test_param_sfo tests/test_param_sfo.cpp)
 target_link_libraries(test_param_sfo PRIVATE umdplay_core)
 target_compile_options(test_param_sfo PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME test_param_sfo COMMAND test_param_sfo)
+
+add_executable(test_recent tests/test_recent.cpp)
+target_link_libraries(test_recent PRIVATE umdplay_core)
+target_compile_options(test_recent PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME test_recent COMMAND test_recent)
+# Run in an isolated config dir so the real ~/.config/umdplay is never touched.
+set_tests_properties(test_recent PROPERTIES
+    ENVIRONMENT "UMDPLAY_CONFIG_DIR=${CMAKE_BINARY_DIR}/test_recent_cfg")
 
 # The audio decoder test decodes a real stream when an ISO is reachable
 # (UMD_ISO env var or ./test_umd.iso) and degrades to state checks otherwise.

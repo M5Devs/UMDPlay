@@ -7,7 +7,6 @@
 
 struct ImFont;
 struct ImDrawList;
-struct ImVec2;
 
 // One playable stream inside a disc (an .MPS file).
 struct StreamItem {
@@ -26,28 +25,56 @@ struct DiscItem {
 
     SDL_Texture*             icon = nullptr;   // ICON0.PNG
     SDL_Texture*             pic1 = nullptr;   // PIC1.PNG (optional)
+
+    bool is_demo = false;                      // synthetic entry (--demo)
+};
+
+// What the hub is currently showing.
+enum class HubMode {
+    Recent,       // the Recent Discs strip
+    Browse,       // the Browse System (folder/file) strip
+    Settings      // the Options strip
+};
+
+// One entry in the Browse System listing (a folder or a .iso file).
+struct BrowseEntry {
+    std::string name;
+    std::string path;
+    bool        is_dir = false;
+    bool        is_iso = false;
 };
 
 // Navigation intents emitted by the UI, consumed by main().
 enum class WmcAction {
     None,
     Quit,
-    Play,       // Enter on a stream
-    BackToHub,  // Esc in player mode
+    Play,               // Enter on the main feature
+    PlayStream,         // Enter on a bonus stream (index in `stream_index`)
+    OpenIso,            // open the .iso at `iso_path` (Recent / Browse)
+    BrowseEnter,        // descend into the folder at `iso_path`
+    BrowseUp,           // go to the parent folder
+    BackToHub,          // Esc in player mode
     TogglePause,
     SeekBackward,
     SeekForward,
-    SeekTo      // seek bar drag (absolute seconds in `seek_seconds`)
+    SeekTo,             // seek bar drag (absolute seconds in `seek_seconds`)
+    ToggleFullscreen,
+    VolumeChanged,      // new gain in `volume`
+    MuteToggled
 };
 
 struct WmcInput {
     WmcAction action = WmcAction::None;
     double    seek_seconds = 0.0;
+    int       stream_index = -1;
+    float     volume = 1.0f;
+    std::string iso_path;
 };
 
-// Windows Media Center inspired 10-foot interface: animated cobalt gradient,
-// glass card carousel and a translucent transport OSD. Renders entirely through
-// Dear ImGui's ImDrawList on top of the shared SDL2 renderer.
+// Windows Media Center inspired 10-foot interface: an animated cobalt backdrop
+// with horizontal strips (Recent / Browse / Options), a disc carousel with
+// clean Play / Extras / Options actions, and a translucent player transport OSD.
+// Renders entirely through Dear ImGui's ImDrawList on top of the SDL2 renderer.
 class WmcUi {
 public:
     WmcUi();
@@ -57,31 +84,32 @@ public:
               const std::string& glyph_sample = "");
     void close();
 
-    // Feed SDL events so ImGui (and our nav layer) can react.
     void process_event(const SDL_Event& e);
-
     void begin_frame();
-    void render();     // ImGui::Render + draw data into the renderer (no present)
-    void present();    // SDL_RenderPresent
+    void render();
+    void present();
 
-    // --- Hub (carousel) ---
-    // Returns navigation intent for the hub. `t` is seconds since start.
-    WmcInput render_hub(const std::vector<DiscItem>& discs,
-                        int& selected_disc, int& selected_stream, float t);
+    // --- Hub ---
+    // `recent` and `browse` are the two card rows; `browse_path` is the folder
+    // currently shown in the Browse strip. Mutates selection indices and
+    // returns any navigation intent for main() to act on.
+    WmcInput render_hub(HubMode& strip,
+                        const std::vector<DiscItem>& recent, int& recent_sel,
+                        const std::vector<BrowseEntry>& browse, int& browse_sel,
+                        const std::string& browse_path,
+                        int& action_sel, bool& extras_open, int& extras_sel,
+                        int& setting_sel,
+                        bool fullscreen, float volume, bool muted, float t);
 
-    // --- Player (video + OSD) ---
-    // `video_tex` is the streaming IYUV texture; pass nullptr for audio-only.
+    // --- Player ---
     WmcInput render_player(SDL_Texture* video_tex, int video_w, int video_h,
                            const DiscItem& disc, const std::string& stream_name,
                            bool paused, double elapsed, double total,
-                           bool& osd_visible, float t);
+                           bool& osd_visible, float volume, bool muted,
+                           bool fullscreen, float t);
 
-    // Decode PNG bytes into an SDL_Texture (RGBA32). Returns nullptr on failure.
     SDL_Texture* texture_from_png(const std::vector<uint8_t>& bytes,
                                   int* out_w = nullptr, int* out_h = nullptr);
-
-    // Scale factor applied to all 10-foot typography (1.0 = 720p baseline).
-    void set_ui_scale(float s) { m_ui_scale = s; }
 
     bool initialized() const { return m_initialized; }
 
@@ -89,21 +117,36 @@ private:
     void draw_background(ImDrawList* dl, float w, float h, float t, SDL_Texture* pic1);
     void draw_card(ImDrawList* dl, const DiscItem& disc, float cx, float cy,
                    float w, float h, float focus, bool selected, float t);
+    void draw_strip_tabs(ImDrawList* dl, float w, float y, HubMode strip, float t);
+    void draw_action_panel(ImDrawList* dl, float x, float y, float w,
+                           const DiscItem& disc, int action_sel, bool extras_open,
+                           int extras_sel, int bonus_count);
+    void draw_browse_panel(ImDrawList* dl, float x, float y, float w,
+                           const std::string& path,
+                           const std::vector<BrowseEntry>& entries,
+                           int browse_sel, float scroll);
+    void draw_settings_panel(ImDrawList* dl, float x, float y, float w,
+                             int setting_sel, bool fullscreen, float volume,
+                             bool muted);
+    void draw_footer(ImDrawList* dl, float w, float h, const std::string& hint);
     void draw_osd(ImDrawList* dl, float w, float h, float alpha,
-                  bool paused, double elapsed, double total, WmcInput& out);
+                  bool paused, double elapsed, double total,
+                  float volume, bool muted, bool fullscreen, WmcInput& out);
 
     SDL_Window*   m_window = nullptr;
     SDL_Renderer* m_renderer = nullptr;
     bool          m_initialized = false;
     bool          m_imgui_ready = false;
-    float         m_ui_scale = 1.0f;
 
     ImFont* m_font_title = nullptr;
     ImFont* m_font_huge  = nullptr;
     ImFont* m_font_body  = nullptr;
 
-    // Smooth carousel scroll position (lerped toward selected index).
-    float m_scroll = 0.0f;
-    float m_osd_alpha = 0.0f;
+    float  m_scroll = 0.0f;         // lerped carousel position
+    float  m_osd_alpha = 0.0f;
     double m_last_input_time = 0.0;
+    HubMode m_last_strip = HubMode::Recent;
+    int    m_focus = 0;             // 0 = card row, 1 = action row
+    float  m_browse_scroll = 0.0f;
+    int    m_browse_cursor = 0;     // cursor row inside the file list
 };

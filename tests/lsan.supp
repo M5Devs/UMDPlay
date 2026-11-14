@@ -6,3 +6,10 @@
 # runs meaningful.
 leak:libdbus-1
 leak:_dbus_string_lengthen
+
+# The Xvfb/llvmpipe software GL stack (Mesa libGLX_mesa) keeps driver-side
+# buffers allocated for the process lifetime. Only reachable in headless
+# render runs; it is system-library state, not UMDPlay code.
+leak:libGLX_mesa
+leak:libgallium
+leak:libGLX
