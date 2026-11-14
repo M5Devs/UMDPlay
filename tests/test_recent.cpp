@@ -65,6 +65,30 @@ int main() {
     // Empty path is rejected.
     assert(!recent::add(""));
 
+    // Equivalent spellings of the same disc (dot segments and symlinks) must
+    // collapse to a single entry rather than filling the list with duplicates.
+    {
+        fs::remove_all(cfg, ec);
+        fs::create_directories(std::string(cfg) + "/discs", ec);
+        const std::string real = std::string(cfg) + "/discs/real.iso";
+        { std::ofstream f(real); f << "x"; }
+        const std::string link = std::string(cfg) + "/discs/link.iso";
+        std::error_code lec;
+        fs::create_symlink(real, link, lec);
+
+        assert(recent::add(real));
+        assert(recent::add(real + "/../real.iso"));   // dot-segment spelling
+        if (!lec) assert(recent::add(link));          // symlink spelling
+        auto v = recent::load();
+        assert(v.size() == 1);
+
+        // A different real file is still kept as a separate entry.
+        const std::string other = std::string(cfg) + "/discs/other.iso";
+        { std::ofstream f(other); f << "y"; }
+        assert(recent::add(other));
+        assert(recent::load().size() == 2);
+    }
+
     // Relative paths are stored absolute so a later CWD change cannot break them.
     {
         fs::remove_all(cfg, ec);
