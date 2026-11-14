@@ -58,7 +58,7 @@ float hash01(int i) {
 void format_time(double s, char* buf, size_t n) {
     if (s < 0 || !std::isfinite(s)) s = 0;
     const int total = static_cast<int>(s);
-    std::snprintf(buf, n, "%d:%02d", total / 60, total % 60);
+    std::snprintf(buf, n, "%d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60);
 }
 
 std::string human_size(uint32_t bytes) {
@@ -737,86 +737,129 @@ WmcInput WmcUi::render_hub(HubMode& strip,
     return out;
 }
 
-void WmcUi::draw_osd(ImDrawList* dl, float w, float h, float alpha,
+bool WmcUi::draw_osd(ImDrawList* dl, float w, float h, float alpha,
                      bool paused, double elapsed, double total,
                      float volume, bool muted, bool fullscreen, WmcInput& out) {
-    if (alpha <= 0.001f) return;
+    if (alpha <= 0.001f) return false;
 
-    const float bar_h = 92.0f;
+    const float bar_h = 112.0f;
     const ImVec2 b0(w * 0.06f, h - bar_h - 26.0f);
     const ImVec2 b1(w * 0.94f, h - 26.0f);
-    dl->AddRectFilled(b0, b1, with_alpha(IM_COL32(8, 20, 46, 235), alpha * 0.94f), 12.0f);
+    dl->AddRectFilled(b0, b1, with_alpha(IM_COL32(8, 20, 46, 238), alpha * 0.95f), 12.0f);
     dl->AddRect(b0, b1, with_alpha(kGlassHi, alpha * 0.35f), 12.0f, 0, 1.5f);
 
-    // Play / pause button.
-    const ImVec2 btn(b0.x + 28, b0.y + 24);
-    dl->AddCircleFilled(ImVec2(btn.x + 22, btn.y + 22), 22.0f,
-                        with_alpha(kCobaltGlow, alpha * 0.9f));
-    if (paused) {
-        dl->AddTriangleFilled(ImVec2(btn.x + 16, btn.y + 10), ImVec2(btn.x + 16, btn.y + 34),
-                              ImVec2(btn.x + 34, btn.y + 22), with_alpha(kTextPrimary, alpha));
-    } else {
-        dl->AddRectFilled(ImVec2(btn.x + 14, btn.y + 11), ImVec2(btn.x + 20, btn.y + 33),
-                          with_alpha(kTextPrimary, alpha));
-        dl->AddRectFilled(ImVec2(btn.x + 25, btn.y + 11), ImVec2(btn.x + 31, btn.y + 33),
-                          with_alpha(kTextPrimary, alpha));
-    }
-    if (ImGui::IsMouseClicked(0) &&
-        ImGui::IsMouseHoveringRect(btn, ImVec2(btn.x + 44, btn.y + 44))) {
-        out.action = WmcAction::TogglePause;
-    }
+    const bool hover = ImGui::IsMouseHoveringRect(b0, b1);
 
-    // Seek bar.
-    const float sx0 = b0.x + 96.0f, sx1 = b1.x - 300.0f, sy = b0.y + 45.0f;
-    dl->AddRectFilled(ImVec2(sx0, sy), ImVec2(sx1, sy + 6),
-                      with_alpha(kTextDim, alpha * 0.4f), 3.0f);
-    const float frac = (total > 0) ? static_cast<float>(elapsed / total) : 0.0f;
-    const float knob = sx0 + (sx1 - sx0) * std::clamp(frac, 0.0f, 1.0f);
-    dl->AddRectFilled(ImVec2(sx0, sy), ImVec2(knob, sy + 6), with_alpha(kAccent, alpha), 3.0f);
-    dl->AddCircleFilled(ImVec2(knob, sy + 3), 8.0f, with_alpha(kTextPrimary, alpha));
+    // --- Timeline scrub bar ------------------------------------------------
+    const float tx0 = b0.x + 26.0f, tx1 = b1.x - 26.0f, ty = b0.y + 30.0f;
+    float frac = (total > 0.0) ? static_cast<float>(elapsed / total) : 0.0f;
+    frac = std::clamp(frac, 0.0f, 1.0f);
+    if (m_seeking) frac = m_seek_preview;
 
-    if (ImGui::IsMouseDragging(0) &&
-        ImGui::IsMouseHoveringRect(ImVec2(sx0, sy - 12), ImVec2(sx1, sy + 18))) {
-        const float f = std::clamp((ImGui::GetMousePos().x - sx0) / (sx1 - sx0), 0.0f, 1.0f);
-        out.action = WmcAction::SeekTo;
-        out.seek_seconds = f * total;
+    dl->AddRectFilled(ImVec2(tx0, ty), ImVec2(tx1, ty + 6),
+                      with_alpha(kTextDim, alpha * 0.40f), 3.0f);
+    const float knob = tx0 + (tx1 - tx0) * frac;
+    dl->AddRectFilled(ImVec2(tx0, ty), ImVec2(knob, ty + 6), with_alpha(kAccent, alpha), 3.0f);
+    dl->AddCircleFilled(ImVec2(knob, ty + 3), m_seeking ? 10.0f : 8.0f,
+                        with_alpha(kTextPrimary, alpha));
+
+    const ImVec2 s_min(tx0, ty - 14.0f), s_max(tx1, ty + 20.0f);
+    if (ImGui::IsMouseHoveringRect(s_min, s_max) && ImGui::IsMouseClicked(0)) m_seeking = true;
+    if (m_seeking) {
+        const float mx = ImGui::GetMousePos().x;
+        m_seek_preview = std::clamp((mx - tx0) / (tx1 - tx0), 0.0f, 1.0f);
+        if (ImGui::IsMouseReleased(0)) {
+            out.action = WmcAction::SeekTo;
+            out.seek_seconds = static_cast<double>(m_seek_preview) * total;
+            m_seeking = false;
+        }
     }
 
-    char te[16], tt[16], line[40];
-    format_time(elapsed, te, sizeof(te));
+    char te[16], tt[16], line[64];
+    format_time(m_seeking ? m_seek_preview * total : elapsed, te, sizeof(te));
     format_time(total, tt, sizeof(tt));
     std::snprintf(line, sizeof(line), "%s / %s", te, tt);
-    dl->AddText(m_font_body, 17.0f, ImVec2(sx1 + 18, sy - 8), with_alpha(kTextPrimary, alpha), line);
+    const float lw = m_font_body->CalcTextSizeA(16.0f, FLT_MAX, 0.0f, line).x;
+    dl->AddText(m_font_body, 16.0f, ImVec2(tx1 - lw, ty - 26.0f),
+                with_alpha(kTextPrimary, alpha), line);
 
-    // Volume readout.
-    char vol[24];
-    std::snprintf(vol, sizeof(vol), "%s %d%%", muted ? "MUTE" : "VOL",
-                  static_cast<int>(volume * 100.0f + 0.5f));
-    dl->AddText(m_font_body, 15.0f, ImVec2(sx1 + 18, sy + 18), with_alpha(kTextDim, alpha), vol);
+    // --- Transport buttons -------------------------------------------------
+    const float by = b0.y + 58.0f;
+    const float bh = 40.0f;
 
-    // Fullscreen button.
-    const ImVec2 fb(b1.x - 232, b0.y + 24);
-    dl->AddRectFilled(fb, ImVec2(fb.x + 104, fb.y + 44),
-                      with_alpha(IM_COL32(30, 70, 130, 230), alpha), 8.0f);
-    dl->AddRect(fb, ImVec2(fb.x + 104, fb.y + 44), with_alpha(kGlassHi, alpha * 0.5f), 8.0f);
-    dl->AddText(m_font_body, 15.0f, ImVec2(fb.x + 12, fb.y + 14),
+    // Round Play / Pause button.
+    const ImVec2 pb(b0.x + 26.0f, by + bh * 0.5f);
+    const bool pb_hover = ImGui::IsMouseHoveringRect(ImVec2(pb.x - 20, pb.y - 20),
+                                                     ImVec2(pb.x + 20, pb.y + 20));
+    dl->AddCircleFilled(pb, 20.0f, with_alpha(pb_hover ? kAccent : kCobaltGlow, alpha * 0.95f));
+    if (paused) {
+        dl->AddTriangleFilled(ImVec2(pb.x - 5, pb.y - 11), ImVec2(pb.x - 5, pb.y + 11),
+                              ImVec2(pb.x + 12, pb.y), with_alpha(kTextPrimary, alpha));
+    } else {
+        dl->AddRectFilled(ImVec2(pb.x - 7, pb.y - 11), ImVec2(pb.x - 1, pb.y + 11),
+                          with_alpha(kTextPrimary, alpha));
+        dl->AddRectFilled(ImVec2(pb.x + 3, pb.y - 11), ImVec2(pb.x + 9, pb.y + 11),
+                          with_alpha(kTextPrimary, alpha));
+    }
+    if (pb_hover && ImGui::IsMouseClicked(0)) out.action = WmcAction::TogglePause;
+
+    float bx = b0.x + 58.0f;
+    auto button = [&](float bw, const char* label, ImU32 col) -> bool {
+        const ImVec2 p(bx, by), p1(bx + bw, by + bh);
+        const bool hov = ImGui::IsMouseHoveringRect(p, p1);
+        dl->AddRectFilled(p, p1, with_alpha(hov ? kCobaltGlow : col, alpha), 8.0f);
+        dl->AddRect(p, p1, with_alpha(kGlassHi, alpha * 0.45f), 8.0f);
+        const ImVec2 ts = m_font_body->CalcTextSizeA(15.0f, FLT_MAX, 0.0f, label);
+        dl->AddText(m_font_body, 15.0f,
+                    ImVec2(p.x + (bw - ts.x) * 0.5f, p.y + (bh - ts.y) * 0.5f),
+                    with_alpha(kTextPrimary, alpha), label);
+        bx += bw + 10.0f;
+        return hov && ImGui::IsMouseClicked(0);
+    };
+
+    const ImU32 kBtn = IM_COL32(30, 70, 130, 230);
+    if (button(76.0f, "Stop", kBtn))         out.action = WmcAction::Stop;
+    if (button(74.0f, "-10s", kBtn)) { out.action = WmcAction::SeekRelative; out.seek_delta = -10.0; }
+    if (button(74.0f, "+10s", kBtn)) { out.action = WmcAction::SeekRelative; out.seek_delta =  10.0; }
+
+    // --- Volume group (right aligned) -------------------------------------
+    const ImVec2 fb(b1.x - 26.0f - 104.0f, by);   // Fullscreen button
+    const ImVec2 mb(fb.x - 10.0f - 64.0f, by);    // Mute button
+    const float  vw = 130.0f;
+    const ImVec2 v0(mb.x - 12.0f - vw, by + bh * 0.5f - 3.0f);
+
+    dl->AddText(m_font_body, 15.0f, ImVec2(v0.x - 40.0f, by + bh * 0.5f - 10.0f),
+                with_alpha(muted ? kTextDim : kTextPrimary, alpha), "VOL");
+    dl->AddRectFilled(v0, ImVec2(v0.x + vw, v0.y + 6), with_alpha(kTextDim, alpha * 0.40f), 3.0f);
+    const float vfill = v0.x + vw * std::clamp(volume, 0.0f, 1.0f);
+    dl->AddRectFilled(v0, ImVec2(vfill, v0.y + 6),
+                      with_alpha(muted ? kTextDim : kAccent, alpha), 3.0f);
+    dl->AddCircleFilled(ImVec2(vfill, v0.y + 3), 8.0f, with_alpha(kTextPrimary, alpha));
+
+    const ImVec2 v_min(v0.x, v0.y - 12.0f), v_max(v0.x + vw, v0.y + 16.0f);
+    if (ImGui::IsMouseHoveringRect(v_min, v_max) && ImGui::IsMouseDown(0)) {
+        const float mx = ImGui::GetMousePos().x;
+        out.action = WmcAction::VolumeChanged;
+        out.volume = std::clamp((mx - v0.x) / vw, 0.0f, 1.0f);
+    }
+
+    const ImVec2 mm(mb.x, mb.y), mm1(mb.x + 64.0f, mb.y + bh);
+    const bool mb_hover = ImGui::IsMouseHoveringRect(mm, mm1);
+    dl->AddRectFilled(mm, mm1, with_alpha(mb_hover ? kCobaltGlow : kBtn, alpha), 8.0f);
+    dl->AddRect(mm, mm1, with_alpha(kGlassHi, alpha * 0.45f), 8.0f);
+    dl->AddText(m_font_body, 15.0f, ImVec2(mm.x + 12.0f, mm.y + (bh - 17.0f) * 0.5f),
+                with_alpha(muted ? kAccent : kTextPrimary, alpha), muted ? "Unmute" : "Mute");
+    if (mb_hover && ImGui::IsMouseClicked(0)) out.action = WmcAction::MuteToggled;
+
+    const ImVec2 ff(fb.x, fb.y), ff1(fb.x + 104.0f, fb.y + bh);
+    const bool fb_hover = ImGui::IsMouseHoveringRect(ff, ff1);
+    dl->AddRectFilled(ff, ff1, with_alpha(fb_hover ? kCobaltGlow : kBtn, alpha), 8.0f);
+    dl->AddRect(ff, ff1, with_alpha(kGlassHi, alpha * 0.45f), 8.0f);
+    dl->AddText(m_font_body, 15.0f, ImVec2(ff.x + 12.0f, ff.y + (bh - 17.0f) * 0.5f),
                 with_alpha(kTextPrimary, alpha), fullscreen ? "Windowed" : "Fullscr.");
-    if (ImGui::IsMouseClicked(0) &&
-        ImGui::IsMouseHoveringRect(fb, ImVec2(fb.x + 104, fb.y + 44))) {
-        out.action = WmcAction::ToggleFullscreen;
-    }
+    if (fb_hover && ImGui::IsMouseClicked(0)) out.action = WmcAction::ToggleFullscreen;
 
-    // Back to Hub button.
-    const ImVec2 hb(b1.x - 120, b0.y + 24);
-    dl->AddRectFilled(hb, ImVec2(hb.x + 96, hb.y + 44),
-                      with_alpha(IM_COL32(30, 70, 130, 230), alpha), 8.0f);
-    dl->AddRect(hb, ImVec2(hb.x + 96, hb.y + 44), with_alpha(kGlassHi, alpha * 0.5f), 8.0f);
-    dl->AddText(m_font_body, 15.0f, ImVec2(hb.x + 12, hb.y + 14),
-                with_alpha(kTextPrimary, alpha), "Hub");
-    if (ImGui::IsMouseClicked(0) &&
-        ImGui::IsMouseHoveringRect(hb, ImVec2(hb.x + 96, hb.y + 44))) {
-        out.action = WmcAction::BackToHub;
-    }
+    return hover || m_seeking;
 }
 
 WmcInput WmcUi::render_player(SDL_Texture* video_tex, int video_w, int video_h,
@@ -849,29 +892,60 @@ WmcInput WmcUi::render_player(SDL_Texture* video_tex, int video_w, int video_h,
         dl->AddImage(reinterpret_cast<ImTextureID>(video_tex), c, ImVec2(c.x + dw, c.y + dh));
     }
 
-    // Auto-hide OSD on input; fade with lerp.
+    // Auto-hide OSD on input; fade with lerp. Never hide while paused or while
+    // the pointer is over the transport bar, and keep it open during a scrub.
     const bool moved = io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f;
     const bool any_key = ImGui::IsKeyPressed(ImGuiKey_LeftArrow) ||
                          ImGui::IsKeyPressed(ImGuiKey_RightArrow) ||
                          ImGui::IsKeyPressed(ImGuiKey_Space) ||
                          ImGui::IsKeyPressed(ImGuiKey_UpArrow) ||
-                         ImGui::IsKeyPressed(ImGuiKey_DownArrow);
+                         ImGui::IsKeyPressed(ImGuiKey_DownArrow) ||
+                         ImGui::IsKeyPressed(ImGuiKey_M) ||
+                         ImGui::IsKeyPressed(ImGuiKey_F11);
     if (moved || any_key) { osd_visible = true; m_last_input_time = t; }
-    if (osd_visible && (t - m_last_input_time) > 3.0) osd_visible = false;
+    if (paused) osd_visible = true;   // never hide while paused
 
     m_osd_alpha = lerp(m_osd_alpha, osd_visible ? 1.0f : 0.0f,
                        std::clamp(io.DeltaTime * 6.0f, 0.0f, 1.0f));
 
     if (ImGui::IsKeyPressed(ImGuiKey_Space, true)) out.action = WmcAction::TogglePause;
-    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true)) out.action = WmcAction::SeekBackward;
-    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true)) out.action = WmcAction::SeekForward;
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, true)) out.action = WmcAction::BackToHub;
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true)) {
+        out.action = WmcAction::SeekRelative;
+        out.seek_delta = ImGui::GetIO().KeyShift ? -30.0 : -10.0;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true)) {
+        out.action = WmcAction::SeekRelative;
+        out.seek_delta = ImGui::GetIO().KeyShift ? 30.0 : 10.0;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true)) {
+        out.action = WmcAction::VolumeChanged;
+        out.volume = std::clamp(volume + 0.05f, 0.0f, 1.0f);
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true)) {
+        out.action = WmcAction::VolumeChanged;
+        out.volume = std::clamp(volume - 0.05f, 0.0f, 1.0f);
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_M, true)) out.action = WmcAction::MuteToggled;
+    if (ImGui::IsKeyPressed(ImGuiKey_F11, true)) out.action = WmcAction::ToggleFullscreen;
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, true) ||
+        ImGui::IsKeyPressed(ImGuiKey_Backspace, true)) out.action = WmcAction::Stop;
 
-    dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, 52), IM_COL32(4, 12, 30, 150));
-    dl->AddText(m_font_body, 18.0f, ImVec2(28, 15), with_alpha(kTextPrimary, 0.9f),
-                (disc.title + "   " + kBullet + "   " + stream_name).c_str());
+    // Title bar (top-left) only while the OSD is up.
+    if (m_osd_alpha > 0.02f) {
+        dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, 52),
+                          IM_COL32(4, 12, 30, static_cast<int>(150 * m_osd_alpha)));
+        dl->AddText(m_font_body, 18.0f, ImVec2(28, 15),
+                    with_alpha(kTextPrimary, 0.92f * m_osd_alpha),
+                    (disc.title + "   " + kBullet + "   " + stream_name).c_str());
+    }
 
-    draw_osd(dl, w, h, m_osd_alpha, paused, elapsed, total, volume, muted, fullscreen, out);
+    const bool osd_hover = draw_osd(dl, w, h, m_osd_alpha, paused, elapsed, total,
+                                    volume, muted, fullscreen, out);
+
+    // Hide only after the timeout, and never while paused / hovering / scrubbing.
+    if (osd_visible && !paused && !osd_hover && (t - m_last_input_time) > 3.0) {
+        osd_visible = false;
+    }
 
     ImGui::End();
     return out;

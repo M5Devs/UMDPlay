@@ -33,6 +33,7 @@ struct Options {
     bool        demo          = false;   // --demo: render a synthetic hub, no ISO
     bool        fullscreen    = false;   // --fullscreen: start in fullscreen
     std::string start_strip;             // --strip recent|browse|settings
+    bool        demo_player   = false;   // --demo-player: render the OSD, no ISO
 };
 
 void print_usage() {
@@ -46,7 +47,8 @@ void print_usage() {
         "  --fullscreen           start in fullscreen (F11 / Alt+Enter toggles)\n"
         "  --strip <name>         start on a hub strip: recent|browse|settings\n"
         "  --probe                print stream/metadata info and exit\n"
-        "  --demo                 render the hub with synthetic data (no ISO)\n";
+        "  --demo                 render the hub with synthetic data (no ISO)\n"
+        "  --demo-player          render the player OSD with synthetic data (no ISO)\n";
 }
 
 bool parse_args(int argc, char** argv, Options& opt) {
@@ -66,6 +68,9 @@ bool parse_args(int argc, char** argv, Options& opt) {
             opt.autoplay = true;
         } else if (a == "--demo") {
             opt.demo = true;
+        } else if (a == "--demo-player") {
+            opt.demo = true;
+            opt.demo_player = true;
         } else if (a == "--fullscreen") {
             opt.fullscreen = true;
         } else if (a == "--strip" && i + 1 < argc) {
@@ -376,6 +381,24 @@ int main(int argc, char** argv) {
     int shot_countdown = -1;
     int play_stream_index = 0;
 
+    // --demo-player: show the transport OSD with a synthetic video texture and
+    // a fake clock so the OSD can be rendered (and screenshotted) with no ISO.
+    std::vector<uint8_t> demo_yuv;
+    if (opt.demo_player) {
+        const int dw = 720, dh = 480;
+        demo_yuv.assign(static_cast<size_t>(dw) * dh * 3 / 2, 0);
+        for (int y = 0; y < dh; ++y)
+            for (int x = 0; x < dw; ++x)
+                demo_yuv[static_cast<size_t>(y) * dw + x] =
+                    static_cast<uint8_t>((x + y) / 4 + 16);
+        for (size_t i = static_cast<size_t>(dw) * dh; i < demo_yuv.size(); ++i)
+            demo_yuv[i] = 128;
+        mode = Mode::Player;
+        paused = false;
+        elapsed = 2130.0;   // 00:35:30
+        total   = 7103.0;   // 01:58:23
+    }
+
     SDL_GameController* pad = nullptr;
     for (int i = 0; i < SDL_NumJoysticks(); ++i) {
         if (SDL_IsGameController(i)) { pad = SDL_GameControllerOpen(i); break; }
@@ -409,7 +432,10 @@ int main(int argc, char** argv) {
         frame_delay_ms = static_cast<uint32_t>(1000.0 / fps);
         total = decoder.get_duration();
         elapsed = 0.0;
-        if (opt.start_seconds > 0.0) decoder.seek_relative(opt.start_seconds);
+        if (opt.start_seconds > 0.0) {
+            decoder.seek_absolute(opt.start_seconds);
+            elapsed = decoder.current_time();
+        }
         last_frame_time = SDL_GetTicks();
         play_stream_index = stream_idx;
         return true;
@@ -543,15 +569,19 @@ int main(int argc, char** argv) {
                 default: break;
             }
         } else {
-            if (!paused) {
+            if (opt.demo_player) {
+                ui.update_demo_texture(demo_yuv.data(), 720, 480);
+            } else if (!paused) {
                 FrameType ft = decoder.read_frame(video_frame, audio_pcm);
                 if (ft == FrameType::Eof) {
                     std::cout << "[*] Reached End of Stream.\n";
                     mode = Mode::Hub;
                     close_decoder();
+                    ui.clear_audio_queue();
+                    ui.pause_audio(false);
                 } else if (ft == FrameType::Video) {
                     ui.update_video_texture(video_frame);
-                    elapsed += 1.0 / fps;
+                    elapsed = decoder.current_time();
                     const uint32_t cur = SDL_GetTicks();
                     const uint32_t e = cur - last_frame_time;
                     if (e < frame_delay_ms) SDL_Delay(frame_delay_ms - e);
@@ -576,25 +606,41 @@ int main(int argc, char** argv) {
                                    ui.volume(), ui.muted(), ui.is_fullscreen(), now());
 
             switch (in.action) {
-                case WmcAction::TogglePause: paused = !paused; break;
+                case WmcAction::TogglePause:
+                    paused = !paused;
+                    ui.pause_audio(paused);
+                    break;
+                case WmcAction::SeekRelative:
                 case WmcAction::SeekBackward:
-                    decoder.seek_relative(-5.0);
-                    elapsed = std::max(0.0, elapsed - 5.0);
+                case WmcAction::SeekForward: {
+                    const double delta = (in.action == WmcAction::SeekRelative)
+                                             ? in.seek_delta
+                                             : (in.action == WmcAction::SeekBackward ? -10.0 : 10.0);
+                    decoder.seek_absolute(elapsed + delta);
+                    elapsed = decoder.current_time();
+                    ui.clear_audio_queue();   // drop stale audio from the old position
                     break;
-                case WmcAction::SeekForward:
-                    decoder.seek_relative(5.0);
-                    elapsed += 5.0;
-                    break;
+                }
                 case WmcAction::SeekTo:
-                    decoder.seek_relative(in.seek_seconds - elapsed);
-                    elapsed = in.seek_seconds;
+                    decoder.seek_absolute(in.seek_seconds);
+                    elapsed = decoder.current_time();
+                    ui.clear_audio_queue();
+                    break;
+                case WmcAction::VolumeChanged:
+                    ui.set_volume(in.volume);
+                    break;
+                case WmcAction::MuteToggled:
+                    ui.set_muted(!ui.muted());
                     break;
                 case WmcAction::ToggleFullscreen:
                     ui.toggle_fullscreen();
                     break;
+                case WmcAction::Stop:
                 case WmcAction::BackToHub:
                     mode = Mode::Hub;
                     close_decoder();
+                    ui.clear_audio_queue();
+                    ui.pause_audio(false);
                     break;
                 default: break;
             }

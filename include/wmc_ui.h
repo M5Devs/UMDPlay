@@ -57,6 +57,8 @@ enum class WmcAction {
     TogglePause,
     SeekBackward,
     SeekForward,
+    SeekRelative,       // seek by `seek_delta` seconds (negative = back)
+    Stop,               // stop playback, return to the Hub
     SeekTo,             // seek bar drag (absolute seconds in `seek_seconds`)
     ToggleFullscreen,
     VolumeChanged,      // new gain in `volume`
@@ -66,6 +68,7 @@ enum class WmcAction {
 struct WmcInput {
     WmcAction action = WmcAction::None;
     double    seek_seconds = 0.0;
+    double    seek_delta = 0.0;
     int       stream_index = -1;
     float     volume = 1.0f;
     std::string iso_path;
@@ -129,7 +132,9 @@ private:
                              int setting_sel, bool fullscreen, float volume,
                              bool muted);
     void draw_footer(ImDrawList* dl, float w, float h, const std::string& hint);
-    void draw_osd(ImDrawList* dl, float w, float h, float alpha,
+    // Returns true when the pointer is over the transport bar (so the caller can
+    // keep the OSD pinned open).
+    bool draw_osd(ImDrawList* dl, float w, float h, float alpha,
                   bool paused, double elapsed, double total,
                   float volume, bool muted, bool fullscreen, WmcInput& out);
 
@@ -145,6 +150,8 @@ private:
     float  m_scroll = 0.0f;         // lerped carousel position
     float  m_osd_alpha = 0.0f;
     double m_last_input_time = 0.0;
+    bool   m_seeking = false;       // timeline scrub in progress
+    float  m_seek_preview = 0.0f;   // scrub position (0..1) while dragging
     HubMode m_last_strip = HubMode::Recent;
     int    m_focus = 0;             // 0 = card row, 1 = action row
     float  m_browse_scroll = 0.0f;

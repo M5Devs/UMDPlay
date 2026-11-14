@@ -16,6 +16,7 @@ umdplay_test
 *.vbo
 *.ppm
 *.png
+!player_osd_preview.png
 *.gif
 *.wav
 *.bin

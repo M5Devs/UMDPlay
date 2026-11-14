@@ -11,6 +11,15 @@ static const uint8_t SONY_FRAME_HEADER[8] = { 0x0F, 0xD0, 0x48, 0x55, 0x00, 0x00
 static constexpr size_t SONY_FRAME_STRIDE = 696;
 static constexpr size_t PSMF_CHUNK        = 4 * 1024 * 1024;  // read granularity for the 0xBD walk
 
+// Best-effort presentation time of a decoded frame, in seconds (-1 if unknown).
+static double frame_time(const AVFrame* f, const AVStream* st) {
+    if (!f || !st) return -1.0;
+    const int64_t ts = f->best_effort_timestamp != AV_NOPTS_VALUE
+                           ? f->best_effort_timestamp : f->pts;
+    if (ts == AV_NOPTS_VALUE) return -1.0;
+    return static_cast<double>(ts) * av_q2d(st->time_base);
+}
+
 Decoder::Decoder() {}
 Decoder::~Decoder() { close(); }
 
@@ -429,14 +438,26 @@ void Decoder::reset_psmf_audio(uint64_t scan_offset) {
 FrameType Decoder::decode_video_frame(AVFrame* out) {
     if (!m_video.codec_ctx || !out) return FrameType::Eof;
     while (true) {
-        if (avcodec_receive_frame(m_video.codec_ctx, out) >= 0) return FrameType::Video;
+        if (avcodec_receive_frame(m_video.codec_ctx, out) >= 0) {
+            m_resync_video = false;
+            return FrameType::Video;
+        }
         int ret = av_read_frame(m_fmt_ctx, m_demux_pkt);
         if (ret < 0) return FrameType::Eof;
         if (m_video.stream_index != -1 && m_demux_pkt->stream_index == m_video.stream_index) {
+            // After a seek, drop packets until the next keyframe so the decoder
+            // never starts on a partial GOP (avoids corrupt macroblocks).
+            if (m_resync_video && !(m_demux_pkt->flags & AV_PKT_FLAG_KEY)) {
+                av_packet_unref(m_demux_pkt);
+                continue;
+            }
             int r = avcodec_send_packet(m_video.codec_ctx, m_demux_pkt);
             av_packet_unref(m_demux_pkt);
             if (r >= 0) {
-                if (avcodec_receive_frame(m_video.codec_ctx, out) >= 0) return FrameType::Video;
+                if (avcodec_receive_frame(m_video.codec_ctx, out) >= 0) {
+                    m_resync_video = false;
+                    return FrameType::Video;
+                }
             }
         } else {
             av_packet_unref(m_demux_pkt);
@@ -539,6 +560,10 @@ FrameType Decoder::read_frame(AVFrame* video_frame, std::vector<uint8_t>& audio_
         }
         m_psmf_video_pending = false;
         m_vcount++;
+        // Advance the wall clock from the stashed frame's PTS.
+        const double pts = frame_time(m_psmf_video, m_fmt_ctx->streams[m_video.stream_index]);
+        if (pts >= 0.0) m_clock = pts;
+        else m_clock += 1.0 / ((m_fps > 0.0 && m_fps < 240.0) ? m_fps : 29.97);
         return FrameType::Video;
     }
 
@@ -546,6 +571,9 @@ FrameType Decoder::read_frame(AVFrame* video_frame, std::vector<uint8_t>& audio_
         // First check if video codec context has any buffered frames available
         if (m_video.codec_ctx && video_frame) {
             if (avcodec_receive_frame(m_video.codec_ctx, video_frame) >= 0) {
+                const double pts = frame_time(video_frame, m_fmt_ctx->streams[m_video.stream_index]);
+                if (pts >= 0.0) m_clock = pts;
+                else m_clock += 1.0 / ((m_fps > 0.0 && m_fps < 240.0) ? m_fps : 29.97);
                 return FrameType::Video;
             }
         }
@@ -556,9 +584,19 @@ FrameType Decoder::read_frame(AVFrame* video_frame, std::vector<uint8_t>& audio_
         }
 
         if (m_video.stream_index != -1 && m_demux_pkt->stream_index == m_video.stream_index) {
+            // After a seek, drop packets until the next keyframe so the decoder
+            // never starts on a partial GOP (avoids corrupt macroblocks).
+            if (m_resync_video && !(m_demux_pkt->flags & AV_PKT_FLAG_KEY)) {
+                av_packet_unref(m_demux_pkt);
+                continue;
+            }
             if (avcodec_send_packet(m_video.codec_ctx, m_demux_pkt) >= 0) {
                 av_packet_unref(m_demux_pkt);
                 if (video_frame && avcodec_receive_frame(m_video.codec_ctx, video_frame) >= 0) {
+                    m_resync_video = false;
+                    const double pts = frame_time(video_frame, m_fmt_ctx->streams[m_video.stream_index]);
+                    if (pts >= 0.0) m_clock = pts;
+                    else m_clock += 1.0 / ((m_fps > 0.0 && m_fps < 240.0) ? m_fps : 29.97);
                     return FrameType::Video;
                 }
             } else {
@@ -577,6 +615,40 @@ FrameType Decoder::read_frame(AVFrame* video_frame, std::vector<uint8_t>& audio_
 }
 
 bool Decoder::seek_relative(double seconds) {
+    return seek_absolute(m_clock + seconds);
+}
+
+// Scan for the MPEG-PS pack / system-header start code nearest at-or-before
+// `target`, so the hand demuxer re-anchors on a real packet boundary rather
+// than mid-payload. Returns `target` unchanged if no start code is found.
+uint64_t Decoder::psmf_find_scan_offset(uint64_t target) {
+    if (!m_psmf_file.is_open()) return target;
+    if (target >= m_io.file_size) return target;
+
+    const uint64_t window = 64 * 1024;
+    const uint64_t begin = target > window ? target - window : 0;
+    const size_t want = static_cast<size_t>(target - begin);
+    if (want == 0) return target;
+
+    m_psmf_scan.resize(want);
+    m_psmf_file.clear();
+    m_psmf_file.seekg(static_cast<std::streamoff>(m_io.base_offset + begin), std::ios::beg);
+    m_psmf_file.read(reinterpret_cast<char*>(m_psmf_scan.data()),
+                     static_cast<std::streamsize>(want));
+    const size_t got = static_cast<size_t>(m_psmf_file.gcount());
+
+    // Walk backwards for the last 00 00 01 BA/BB (pack or system header).
+    for (size_t i = got; i >= 4; --i) {
+        const uint8_t* p = m_psmf_scan.data() + (i - 4);
+        if (p[0] == 0 && p[1] == 0 && p[2] == 1 &&
+            (p[3] == 0xBA || p[3] == 0xBB)) {
+            return begin + (i - 4);
+        }
+    }
+    return target;
+}
+
+bool Decoder::seek_absolute(double seconds) {
     if (!m_fmt_ctx) return false;
 
     int primary_stream = m_video.stream_index != -1 ? m_video.stream_index : m_audio.stream_index;
@@ -584,34 +656,41 @@ bool Decoder::seek_relative(double seconds) {
 
     AVStream* st = m_fmt_ctx->streams[primary_stream];
 
-    int64_t seek_offset = static_cast<int64_t>(seconds * AV_TIME_BASE);
-    int flags = seconds < 0 ? AVSEEK_FLAG_BACKWARD : 0;
+    const double dur = get_duration();
+    if (seconds < 0.0) seconds = 0.0;
+    if (dur > 0.0 && seconds > dur) seconds = dur;
 
-    if (m_video.codec_ctx) {
-        avcodec_flush_buffers(m_video.codec_ctx);
-    }
-    if (m_audio.codec_ctx) {
-        avcodec_flush_buffers(m_audio.codec_ctx);
-    }
+    const int64_t seek_offset = static_cast<int64_t>(seconds * AV_TIME_BASE);
+    const int flags = AVSEEK_FLAG_BACKWARD;
+
+    if (m_video.codec_ctx) avcodec_flush_buffers(m_video.codec_ctx);
+    if (m_audio.codec_ctx) avcodec_flush_buffers(m_audio.codec_ctx);
     m_audio_buffer.clear();
+    m_psmf_video_pending = false;
+    m_resync_video = true;
 
     int ret = av_seek_frame(m_fmt_ctx, -1, seek_offset, flags);
     if (ret < 0) {
-        ret = av_seek_frame(m_fmt_ctx, primary_stream, static_cast<int64_t>(seconds / av_q2d(st->time_base)), flags);
+        ret = av_seek_frame(m_fmt_ctx, primary_stream,
+                            static_cast<int64_t>(seconds / av_q2d(st->time_base)), flags);
     }
 
-    if (m_avio_ctx) {
-        avio_flush(m_avio_ctx);
-    }
+    if (m_avio_ctx) avio_flush(m_avio_ctx);
 
     if (m_psmf_audio) {
-        // Re-anchor the manual audio demuxer to the demuxer's new byte position.
+        // Re-anchor the manual ATRAC3+ demuxer. Prefer the byte position the
+        // FFmpeg demuxer landed on; fall back to a proportional estimate of the
+        // MPEG-PS offset, snapped to a pack header.
         int64_t pos = m_avio_ctx ? avio_tell(m_avio_ctx) : 0;
+        if (pos <= 0 && dur > 0.0 && m_io.file_size > 0) {
+            pos = static_cast<int64_t>((seconds / dur) * m_io.file_size);
+        }
         if (pos < 0) pos = 0;
-        reset_psmf_audio(static_cast<uint64_t>(pos));
+        reset_psmf_audio(psmf_find_scan_offset(static_cast<uint64_t>(pos)));
         m_vcount = 0;
     }
 
+    m_clock = seconds;
     return ret >= 0;
 }
 
@@ -695,6 +774,8 @@ void Decoder::close() {
     m_psmf_samples = 0;
     m_psmf_video_pending = false;
     m_vcount = 0;
+    m_clock = 0.0;
+    m_resync_video = false;
     if (m_swr_ctx) { swr_free(&m_swr_ctx); }
     if (m_temp_audio_frame) { av_frame_free(&m_temp_audio_frame); }
     if (m_demux_pkt) { av_packet_free(&m_demux_pkt); }

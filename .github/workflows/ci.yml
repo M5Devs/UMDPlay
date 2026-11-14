@@ -53,8 +53,19 @@ jobs:
             ls -lh "/tmp/wmc_ui_${strip}.png"
           done
 
+      - name: Verify Player OSD Renders (Xvfb)
+        # --demo-player draws the transport OSD over a synthetic video texture
+        # (no ISO needed), proving the player chrome lays out headlessly.
+        run: |
+          xvfb-run -a -s "-screen 0 1280x720x24" \
+            ./build/bin/umdplay --demo-player --screenshot /tmp/player_osd.png
+          test -s /tmp/player_osd.png
+          ls -lh /tmp/player_osd.png
+
       - name: Upload UI Screenshots
         uses: actions/upload-artifact@v4
         with:
           name: wmc-ui-preview
-          path: /tmp/wmc_ui_*.png
+          path: |
+            /tmp/wmc_ui_*.png
+            /tmp/player_osd.png
