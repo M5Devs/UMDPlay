@@ -68,6 +68,8 @@ add_library(umdplay_core STATIC
     src/param_sfo.cpp
     src/decoder.cpp
     src/recent.cpp
+    src/gesture.cpp
+    src/aspect.cpp
 )
 target_link_libraries(umdplay_core PUBLIC
     ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES}
@@ -123,6 +125,12 @@ add_test(NAME test_playback COMMAND test_playback)
 set_tests_properties(test_playback PROPERTIES
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     ENVIRONMENT "UMD_ISO=${PROJECT_SOURCE_DIR}/test_umd.iso")
+
+# Pure math: the SDL-free gesture recognizer and the aspect/zoom modes.
+add_executable(test_gesture tests/test_gesture.cpp)
+target_link_libraries(test_gesture PRIVATE umdplay_core)
+target_compile_options(test_gesture PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME test_gesture COMMAND test_gesture)
 
 # The audio decoder test decodes a real stream when an ISO is reachable
 # (UMD_ISO env var or ./test_umd.iso) and degrades to state checks otherwise.
