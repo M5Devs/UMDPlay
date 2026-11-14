@@ -84,6 +84,8 @@ sudo apt-get update
 sudo apt-get install -y cmake build-essential pkg-config \
                         libavformat-dev libavcodec-dev libavutil-dev \
                         libswscale-dev libswresample-dev libsdl2-dev
+# Optional: CJK font so Japanese disc titles render (Noto Sans CJK)
+sudo apt-get install -y fonts-noto-cjk
 # Optional: ffmpeg CLI, needed only for --export-clip
 sudo apt-get install -y ffmpeg
 ```

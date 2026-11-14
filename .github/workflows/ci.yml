@@ -22,7 +22,7 @@ jobs:
           sudo apt-get install -y cmake build-essential pkg-config \
                                   libavformat-dev libavcodec-dev libavutil-dev \
                                   libswscale-dev libswresample-dev \
-                                  libsdl2-dev xvfb
+                                  libsdl2-dev xvfb fonts-noto-cjk
 
       - name: Configure CMake
         # Treat project warnings as errors so CI enforces the zero-warning bar.

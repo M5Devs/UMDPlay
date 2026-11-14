@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <sys/stat.h>
 
 namespace {
 
@@ -30,6 +31,13 @@ const char* kFontCandidates[] = {
     "C:\\Windows\\Fonts\\segoeui.ttf",
     "C:\\Windows\\Fonts\\arial.ttf",
 };
+
+// ImGui's AddFontFromFileTTF calls ErrorLog() on a missing file, which asserts
+// via BeginErrorTooltip() outside a frame and crashes. Stat the file first.
+bool file_exists(const char* path) {
+    struct stat st;
+    return path && stat(path, &st) == 0;
+}
 
 ImU32 with_alpha(ImU32 c, float a) {
     a = std::clamp(a, 0.0f, 1.0f);
@@ -82,6 +90,7 @@ bool WmcUi::init(SDL_Window* window, SDL_Renderer* renderer,
     fc.OversampleH = 2;
     fc.OversampleV = 2;
     for (const char* path : kFontCandidates) {
+        if (!file_exists(path)) continue;
         if (io.Fonts->AddFontFromFileTTF(path, 20.0f, &fc, ranges.Data)) break;
     }
     if (io.Fonts->Fonts.Size == 0) {
