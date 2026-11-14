@@ -85,11 +85,9 @@ void UiManager::update_texture_size(int width, int height) {
     }
 }
 
-void UiManager::render_video_frame(AVFrame* frame) {
+void UiManager::update_video_texture(AVFrame* frame) {
     if (!m_renderer || !frame) return;
-
     update_texture_size(frame->width, frame->height);
-
     if (m_texture) {
         SDL_UpdateYUVTexture(
             m_texture,
@@ -98,11 +96,21 @@ void UiManager::render_video_frame(AVFrame* frame) {
             frame->data[1], frame->linesize[1],
             frame->data[2], frame->linesize[2]
         );
+    }
+}
 
+void UiManager::render_video_frame(AVFrame* frame) {
+    if (!m_renderer || !frame) return;
+    update_video_texture(frame);
+    if (m_texture) {
         SDL_RenderClear(m_renderer);
         SDL_RenderCopy(m_renderer, m_texture, nullptr, nullptr);
         SDL_RenderPresent(m_renderer);
     }
+}
+
+void UiManager::set_window_size(int w, int h) {
+    if (m_window) SDL_SetWindowSize(m_window, w, h);
 }
 
 void UiManager::queue_audio(const uint8_t* data, uint32_t len) {

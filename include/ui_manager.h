@@ -24,12 +24,23 @@ public:
     bool init(const std::string& title = "UMDPlay - PSP UMD Video Player", int width = 960, int height = 544);
     void close();
 
-    void render_video_frame(AVFrame* frame);
+    // Upload a decoded frame into the streaming video texture (no present).
+    void update_video_texture(AVFrame* frame);
     void queue_audio(const uint8_t* data, uint32_t len);
+
+    // Legacy single-shot present used by simple callers.
+    void render_video_frame(AVFrame* frame);
 
     UserAction handle_events();
 
     bool is_initialized() const { return m_initialized; }
+
+    SDL_Window*   window()   const { return m_window; }
+    SDL_Renderer* renderer() const { return m_renderer; }
+    SDL_Texture*  video_texture() const { return m_texture; }
+    int           video_width()  const { return m_texture_width; }
+    int           video_height() const { return m_texture_height; }
+    void          set_window_size(int w, int h);
 
 private:
     bool m_initialized = false;

@@ -1,5 +1,6 @@
 # Binaries & Builds
 build/
+build-asan/
 bin/
 *.o
 *.a
@@ -20,9 +21,13 @@ umdplay_test
 *.bin
 *.oma
 *.at3
+*.mp4
 
 # IDE & OS files
 .DS_Store
 .vscode/
 .idea/
 *.swp
+
+# Agent memory
+.openhands/

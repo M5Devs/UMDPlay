@@ -1,14 +1,19 @@
 cmake_minimum_required(VERSION 3.16)
-project(UMDPlay VERSION 0.3.0 LANGUAGES CXX)
+project(UMDPlay VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 include_directories(${PROJECT_SOURCE_DIR}/include)
+include_directories(${PROJECT_SOURCE_DIR}/third_party)
 
-# البحث عن مكاتب FFmpeg و SDL2
+# --- FFmpeg + SDL2 (system) ---
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(AVFORMAT REQUIRED libavformat)
 pkg_check_modules(AVCODEC REQUIRED libavcodec)
@@ -18,53 +23,85 @@ pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
 pkg_check_modules(SDL2 REQUIRED sdl2)
 
 include_directories(
-    ${AVFORMAT_INCLUDE_DIRS}
-    ${AVCODEC_INCLUDE_DIRS}
-    ${AVUTIL_INCLUDE_DIRS}
-    ${SWSCALE_INCLUDE_DIRS}
-    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVFORMAT_INCLUDE_DIRS} ${AVCODEC_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS}
+    ${SWSCALE_INCLUDE_DIRS} ${SWRESAMPLE_INCLUDE_DIRS} ${SDL2_INCLUDE_DIRS}
+)
+
+# --- Dear ImGui (lightweight, fetched & pinned) ---
+include(FetchContent)
+set(IMGUI_TAG v1.91.5)
+FetchContent_Declare(
+    imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG        ${IMGUI_TAG}
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(imgui)
+
+add_library(imgui_backends STATIC
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer2.cpp
+)
+target_include_directories(imgui_backends PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
     ${SDL2_INCLUDE_DIRS}
 )
+target_link_libraries(imgui_backends PUBLIC ${SDL2_LIBRARIES})
+target_compile_options(imgui_backends PRIVATE -w)   # third-party: silence its warnings
 
-# بناء مشغل UMDPlay (Phase 3 Engine)
+# stb single-header libs (implementation lives in src/stb_impl.cpp)
+add_library(stb_image STATIC src/stb_impl.cpp)
+target_include_directories(stb_image PUBLIC ${PROJECT_SOURCE_DIR}/third_party)
+
+# --- UMDPlay core (decoder + ISO reader + SFO parser), shared by app & tests ---
+add_library(umdplay_core STATIC
+    src/iso_reader.cpp
+    src/param_sfo.cpp
+    src/decoder.cpp
+)
+target_link_libraries(umdplay_core PUBLIC
+    ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES}
+    ${SWSCALE_LIBRARIES} ${SWRESAMPLE_LIBRARIES}
+)
+target_compile_options(umdplay_core PRIVATE -Wall -Wextra -Wpedantic)
+
+# --- Player executable ---
 add_executable(umdplay
     src/main.cpp
-    src/iso_reader.cpp
-    src/decoder.cpp
     src/ui_manager.cpp
+    src/wmc_ui.cpp
+    src/clip_export.cpp
 )
-
 target_link_libraries(umdplay PRIVATE
-    ${AVFORMAT_LIBRARIES}
-    ${AVCODEC_LIBRARIES}
-    ${AVUTIL_LIBRARIES}
-    ${SWSCALE_LIBRARIES}
-    ${SWRESAMPLE_LIBRARIES}
+    umdplay_core imgui_backends stb_image
     ${SDL2_LIBRARIES}
 )
+target_compile_options(umdplay PRIVATE -Wall -Wextra -Wpedantic)
 
-target_compile_options(umdplay PRIVATE -Wall -Wextra -O2)
-
+# --- Tests ---
 enable_testing()
 
-add_executable(test_audio_decoder
-    tests/test_audio_decoder.cpp
-    src/iso_reader.cpp
-    src/decoder.cpp
-)
-
-target_link_libraries(test_audio_decoder PRIVATE
-    ${AVFORMAT_LIBRARIES}
-    ${AVCODEC_LIBRARIES}
-    ${AVUTIL_LIBRARIES}
-    ${SWSCALE_LIBRARIES}
-    ${SWRESAMPLE_LIBRARIES}
-)
-
-target_compile_options(test_audio_decoder PRIVATE -Wall -Wextra -O2)
-
+add_executable(test_audio_decoder tests/test_audio_decoder.cpp)
+target_link_libraries(test_audio_decoder PRIVATE umdplay_core)
+target_compile_options(test_audio_decoder PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME test_audio_decoder COMMAND test_audio_decoder)
+
+add_executable(test_param_sfo tests/test_param_sfo.cpp)
+target_link_libraries(test_param_sfo PRIVATE umdplay_core)
+target_compile_options(test_param_sfo PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME test_param_sfo COMMAND test_param_sfo)
+
+# The audio decoder test decodes a real stream when an ISO is reachable
+# (UMD_ISO env var or ./test_umd.iso) and degrades to state checks otherwise.
+set_tests_properties(test_audio_decoder PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    ENVIRONMENT "UMD_ISO=${PROJECT_SOURCE_DIR}/test_umd.iso")
 
 install(TARGETS umdplay DESTINATION bin)
 
-message(STATUS "UMDPlay ${PROJECT_VERSION} — Ready for ISO playback")
+message(STATUS "UMDPlay ${PROJECT_VERSION} — WMC 10-foot UI (ImGui ${IMGUI_TAG})")
