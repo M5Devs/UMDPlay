@@ -27,8 +27,105 @@ bool IsoReader::open() {
     std::cout << "[IsoReader] Opened: " << m_iso_path << "\n";
     std::cout << "[IsoReader] Using UDF path (STREAM/ @ LBA "
               << UMD_STREAM_DIR_LBA << ")\n";
+
+    parse_metadata_dir();
     return parse_udf_stream_dir();
 }
+
+// Scan UMD_VIDEO/ root (sector 24) for File Identifier Descriptors naming
+// metadata files (PARAM.SFO, ICON0.PNG, PIC1.PNG, SND0.AT3). Uses the same
+// offset convention as the STREAM/ parser: LBA at name_start-31 (uint32 LE),
+// size at name_start-23 (uint32 LE).
+void IsoReader::parse_metadata_dir() {
+    uint8_t sector[UMD_SECTOR_SIZE];
+    if (!read_sector(UMD_ROOT_DIR_LBA, sector)) return;
+
+    static const char* kNames[] = {
+        "PARAM.SFO", "ICON0.PNG", "ICON1.PNG", "PIC1.PNG", "SND0.AT3"
+    };
+
+    size_t offset = 0;
+    while (offset < UMD_SECTOR_SIZE - 4) {
+        bool found = false;
+        for (size_t i = offset; i < UMD_SECTOR_SIZE - 4; ++i) {
+            for (const char* nm : kNames) {
+                const size_t len = std::strlen(nm);
+                if (i + len > UMD_SECTOR_SIZE) continue;
+                if (std::memcmp(sector + i, nm, len) != 0) continue;
+
+                size_t name_start = i;
+                while (name_start > 0 &&
+                       sector[name_start - 1] >= 0x20 &&
+                       sector[name_start - 1] < 0x7F) {
+                    --name_start;
+                }
+
+                if (name_start < 31) { offset = i + len; found = true; break; }
+
+                const uint8_t* p_lba = sector + (name_start - 31);
+                uint32_t lba = static_cast<uint32_t>(p_lba[0]) |
+                               (static_cast<uint32_t>(p_lba[1]) << 8) |
+                               (static_cast<uint32_t>(p_lba[2]) << 16) |
+                               (static_cast<uint32_t>(p_lba[3]) << 24);
+
+                const uint8_t* p_size = sector + (name_start - 23);
+                uint32_t size_bytes = static_cast<uint32_t>(p_size[0]) |
+                                      (static_cast<uint32_t>(p_size[1]) << 8) |
+                                      (static_cast<uint32_t>(p_size[2]) << 16) |
+                                      (static_cast<uint32_t>(p_size[3]) << 24);
+
+                if (lba > 0 && size_bytes > 0) {
+                    UmdFile f;
+                    f.name       = nm;
+                    f.lba        = lba;
+                    f.size_bytes = size_bytes;
+                    m_metadata.push_back(f);
+                }
+                offset = i + len;
+                found = true;
+                break;
+            }
+            if (found) break;
+        }
+        if (!found) break;
+    }
+
+    // Parse PARAM.SFO eagerly so the UI can show TITLE / DISC_ID immediately.
+    for (const auto& f : m_metadata) {
+        if (f.name == "PARAM.SFO") {
+            std::vector<uint8_t> raw = read_metadata(f.name);
+            if (!raw.empty()) parse_param_sfo(raw.data(), raw.size(), m_param);
+            break;
+        }
+    }
+
+    std::cout << "[IsoReader] Metadata files found: " << m_metadata.size();
+    if (!m_param.title.empty()) std::cout << " (TITLE: \"" << m_param.title << "\")";
+    std::cout << "\n";
+}
+
+bool IsoReader::has_metadata(const std::string& filename) const {
+    for (const auto& f : m_metadata) {
+        if (f.name == filename) return true;
+    }
+    return false;
+}
+
+std::vector<uint8_t> IsoReader::read_metadata(const std::string& filename) const {
+    for (const auto& f : m_metadata) {
+        if (f.name != filename) continue;
+        std::ifstream in(m_iso_path, std::ios::binary);
+        if (!in) return {};
+        in.seekg(static_cast<std::streamoff>(f.lba) * UMD_SECTOR_SIZE);
+        std::vector<uint8_t> buf(f.size_bytes);
+        in.read(reinterpret_cast<char*>(buf.data()),
+                static_cast<std::streamsize>(buf.size()));
+        buf.resize(static_cast<size_t>(in.gcount()));
+        return buf;
+    }
+    return {};
+}
+
 
 bool IsoReader::parse_udf_stream_dir() {
     uint8_t sector[UMD_SECTOR_SIZE];
@@ -121,9 +218,48 @@ std::vector<uint8_t> IsoReader::read_mps(const MpsEntry& entry) const {
 }
 
 void IsoReader::dump_mps_header(const MpsEntry& entry, size_t bytes) const {
-    // (دالة الـ Dump القديمة)
+    std::ifstream f(m_iso_path, std::ios::binary);
+    if (!f) return;
+    f.seekg(static_cast<std::streamoff>(entry.lba) * UMD_SECTOR_SIZE);
+    std::vector<uint8_t> buf(std::min<size_t>(bytes, 4096));
+    f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+    const size_t got = static_cast<size_t>(f.gcount());
+
+    std::cout << "[IsoReader] " << entry.name << " header ("
+              << got << " bytes):\n";
+    for (size_t i = 0; i < got; i += 16) {
+        std::cout << "  " << std::hex << std::setw(6) << std::setfill('0') << i
+                  << "  " << std::dec << std::setfill(' ');
+        for (size_t j = 0; j < 16 && i + j < got; ++j) {
+            std::cout << std::hex << std::setw(2) << std::setfill('0')
+                      << static_cast<int>(buf[i + j]) << ' ';
+        }
+        std::cout << "\n";
+    }
 }
 
 bool IsoReader::extract_all(const std::string& output_dir) const {
+    if (m_entries.empty()) return false;
+    for (const auto& e : m_entries) {
+        const std::string path = output_dir + "/" + e.name;
+        std::ofstream out(path, std::ios::binary);
+        if (!out) {
+            std::cerr << "[IsoReader] Cannot write " << path << "\n";
+            return false;
+        }
+        std::ifstream in(m_iso_path, std::ios::binary);
+        if (!in) return false;
+        in.seekg(static_cast<std::streamoff>(e.lba) * UMD_SECTOR_SIZE);
+        std::vector<char> chunk(1 << 20);
+        uint64_t remaining = e.size_bytes;
+        while (remaining > 0) {
+            const size_t want = static_cast<size_t>(std::min<uint64_t>(remaining, chunk.size()));
+            in.read(chunk.data(), static_cast<std::streamsize>(want));
+            const size_t got = static_cast<size_t>(in.gcount());
+            if (got == 0) break;
+            out.write(chunk.data(), static_cast<std::streamsize>(got));
+            remaining -= got;
+        }
+    }
     return true;
 }

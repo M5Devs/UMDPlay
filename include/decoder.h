@@ -50,6 +50,17 @@ public:
     bool has_audio() const { return m_audio.stream_index != -1 || m_psmf_audio; }
     double get_fps() const { return m_fps; }
 
+    // Coded video dimensions (0 if no video stream is open).
+    int video_width() const {
+        return m_video.codec_ctx ? m_video.codec_ctx->width : 0;
+    }
+    int video_height() const {
+        return m_video.codec_ctx ? m_video.codec_ctx->height : 0;
+    }
+
+    // Total stream duration in seconds (0 if unknown).
+    double get_duration() const;
+
 private:
     struct StreamIoState {
         std::ifstream iso_file;
@@ -106,6 +117,7 @@ private:
     AVFrame*         m_temp_audio_frame = nullptr;
     AVPacket*        m_demux_pkt   = nullptr;
     double           m_fps         = 29.97;
+    double           m_duration    = 0.0;   // seconds (0 = unknown)
 
     static void save_ppm(AVFrame* frame, int width, int height, const std::string& filename);
 };

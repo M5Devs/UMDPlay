@@ -1,0 +1,8 @@
+# LeakSanitizer suppressions.
+#
+# SDL2 pulls in dbus (via the ibus/IME backend), which keeps a process-global
+# string buffer alive for the lifetime of the process. That allocation is inside
+# the system library, not UMDPlay, so it is suppressed here to keep sanitizer
+# runs meaningful.
+leak:libdbus-1
+leak:_dbus_string_lengthen

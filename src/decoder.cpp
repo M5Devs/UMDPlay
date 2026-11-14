@@ -105,6 +105,9 @@ bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
                 } else if (st->r_frame_rate.den > 0 && st->r_frame_rate.num > 0) {
                     m_fps = av_q2d(st->r_frame_rate);
                 }
+                if (st->duration != AV_NOPTS_VALUE && st->duration > 0) {
+                    m_duration = st->duration * av_q2d(st->time_base);
+                }
             }
         } else if ((codecpar->codec_type == AVMEDIA_TYPE_AUDIO || st->id == 0x1BD || codecpar->codec_id == AV_CODEC_ID_ATRAC3P) && m_audio.stream_index == -1) {
             m_audio.stream_index = i;
@@ -214,7 +217,16 @@ bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
     return (m_video.stream_index != -1 || m_audio.stream_index != -1 || m_psmf_audio);
 }
 
+double Decoder::get_duration() const {
+    if (m_duration > 0.0) return m_duration;
+    if (m_fmt_ctx && m_fmt_ctx->duration != AV_NOPTS_VALUE && m_fmt_ctx->duration > 0) {
+        return static_cast<double>(m_fmt_ctx->duration) / AV_TIME_BASE;
+    }
+    return 0.0;
+}
+
 bool Decoder::init_psmf_audio() {
+
     m_psmf_file.open(m_iso_path, std::ios::binary);
     if (!m_psmf_file.is_open()) return false;
 
