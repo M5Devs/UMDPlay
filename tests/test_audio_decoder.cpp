@@ -31,7 +31,60 @@ std::string find_iso() {
 
 }  // namespace
 
+// Compiled-out under NDEBUG, so use a macro that always evaluates.
+#define CHECK(cond)                                                            \
+    do {                                                                       \
+        if (!(cond)) {                                                         \
+            std::cerr << "CHECK failed: " #cond " (" << __FILE__ << ":"        \
+                      << __LINE__ << ")\n";                                    \
+            return 1;                                                          \
+        }                                                                      \
+    } while (0)
+
+// Build a synthetic ATRAC3+ byte stream: N frames, each an 8-byte 0F D0 48 55
+// sync followed by `stride-8` filler bytes, with optional larger gaps that
+// simulate interleaved video packets. Returns the buffer.
+static std::vector<uint8_t> synth_atrac3p(size_t stride, size_t frames,
+                                          const std::vector<size_t>& extra_gaps) {
+    std::vector<uint8_t> buf;
+    auto push_frame = [&]() {
+        buf.push_back(0x0F); buf.push_back(0xD0);
+        buf.push_back(0x48); buf.push_back(0x55);
+        buf.push_back(0x00); buf.push_back(0x00);
+        buf.push_back(0x00); buf.push_back(0x00);
+        for (size_t i = 8; i < stride; ++i) buf.push_back(0xA5);
+    };
+    for (size_t f = 0; f < frames; ++f) {
+        push_frame();
+        if (f < extra_gaps.size()) {
+            for (size_t g = 0; g < extra_gaps[f]; ++g) buf.push_back(0x00);
+        }
+    }
+    return buf;
+}
+
 int main() {
+    // --- ATRAC3+ stride detection (always runs, no ISO needed) ---
+    {
+        // The common 696-byte stereo stride.
+        auto s696 = synth_atrac3p(696, 20, {});
+        CHECK(Decoder::detect_stride_from(s696.data(), s696.size(), 0) == 696);
+
+        // A non-696 bitrate (e.g. a hypothetical 384-byte frame) must be read
+        // from the data, not hardcoded.
+        auto s384 = synth_atrac3p(384, 20, {});
+        CHECK(Decoder::detect_stride_from(s384.data(), s384.size(), 696) == 384);
+
+        // Interleaved large gaps (video packets) must not win the vote.
+        auto noisy = synth_atrac3p(696, 20, {4096, 0, 2048, 0, 8000});
+        CHECK(Decoder::detect_stride_from(noisy.data(), noisy.size(), 0) == 696);
+
+        // Too little data -> fall back to the caller's default.
+        uint8_t tiny[8] = {0x0F, 0xD0, 0x48, 0x55, 0, 0, 0, 0};
+        CHECK(Decoder::detect_stride_from(tiny, sizeof(tiny), 696) == 696);
+        std::cout << "[+] ATRAC3+ stride detection: 696 / 384 / noisy / fallback ok\n";
+    }
+
     // --- Default-constructed state (always runs) ---
     Decoder fresh;
     assert(!fresh.has_video());

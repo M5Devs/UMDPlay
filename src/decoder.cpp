@@ -1,14 +1,16 @@
 #include "decoder.h"
 #include <algorithm>
 #include <cstring>
+#include <map>
 #include <sstream>
 
 static constexpr size_t AVIO_BUF_SIZE = 64 * 1024;
 
-// Sony PSMF ATRAC3+ framing: each frame is prefixed by an 8-byte sync header and
-// the stride between consecutive frames is fixed at 696 bytes (688-byte payload).
+// Sony PSMF ATRAC3+ framing: each frame is prefixed by an 8-byte sync header.
+// The stride (sync + payload) is detected per stream; 696 bytes is the common
+// 176.4 KB/s stereo default but not universal (see psmf_detect_stride).
 static const uint8_t SONY_FRAME_HEADER[8] = { 0x0F, 0xD0, 0x48, 0x55, 0x00, 0x00, 0x00, 0x00 };
-static constexpr size_t SONY_FRAME_STRIDE = 696;
+static constexpr size_t SONY_FRAME_STRIDE = SONY_FRAME_STRIDE_DEFAULT;
 static constexpr size_t PSMF_CHUNK        = 4 * 1024 * 1024;  // read granularity for the 0xBD walk
 
 // Best-effort presentation time of a decoded frame, in seconds (-1 if unknown).
@@ -242,11 +244,15 @@ bool Decoder::init_psmf_audio() {
     const AVCodec* audio_decoder = avcodec_find_decoder(AV_CODEC_ID_ATRAC3P);
     if (!audio_decoder) return false;
 
+    // Probe the real frame stride before sizing the decoder so non-696 discs
+    // (different ATRAC3+ bitrates) demux correctly.
+    m_psmf_stride = psmf_detect_stride();
+
     m_audio.codec = audio_decoder;
     m_audio.codec_ctx = avcodec_alloc_context3(audio_decoder);
     m_audio.codec_ctx->sample_rate = 44100;
     m_audio.codec_ctx->ch_layout = AV_CHANNEL_LAYOUT_STEREO;
-    m_audio.codec_ctx->block_align = static_cast<int>(SONY_FRAME_STRIDE);
+    m_audio.codec_ctx->block_align = static_cast<int>(m_psmf_stride);
     m_audio.codec_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
     if (avcodec_open2(m_audio.codec_ctx, audio_decoder, nullptr) < 0) {
         avcodec_free_context(&m_audio.codec_ctx);
@@ -349,13 +355,60 @@ bool Decoder::psmf_read_more() {
     return false;
 }
 
+// Detect the ATRAC3+ frame stride from a raw byte window: histogram the gaps
+// between consecutive 0F D0 48 55 sync words and take the most common one.
+// Larger gaps come from video packets / PES headers interleaved between audio
+// frames, so they never win the vote. Returns `fallback` when fewer than two
+// syncs are visible.
+size_t Decoder::detect_stride_from(const uint8_t* buf, size_t n, size_t fallback) {
+    if (!buf || n < 8) return fallback;
+
+    std::vector<size_t> syncs;
+    for (size_t i = 0; i + 4 <= n; ++i) {
+        if (buf[i] == 0x0F && buf[i + 1] == 0xD0 &&
+            buf[i + 2] == 0x48 && buf[i + 3] == 0x55) {
+            syncs.push_back(i);
+        }
+    }
+    if (syncs.size() < 2) return fallback;
+
+    std::map<size_t, size_t> hist;
+    for (size_t k = 1; k < syncs.size(); ++k) {
+        const size_t gap = syncs[k] - syncs[k - 1];
+        if (gap >= 64 && gap <= 8192) ++hist[gap];
+    }
+    if (hist.empty()) return fallback;
+
+    size_t best = fallback, best_count = 0;
+    for (const auto& kv : hist) {
+        if (kv.second > best_count) { best = kv.first; best_count = kv.second; }
+    }
+    return best;
+}
+
+// Read a window at the stream start and derive the stride from it.
+size_t Decoder::psmf_detect_stride() {
+    constexpr size_t WINDOW = 512 * 1024;
+    std::vector<uint8_t> buf(std::min<size_t>(WINDOW, m_io.file_size));
+    if (buf.size() < 16) return SONY_FRAME_STRIDE;
+
+    m_psmf_file.clear();
+    m_psmf_file.seekg(static_cast<std::streamoff>(m_io.base_offset), std::ios::beg);
+    m_psmf_file.read(reinterpret_cast<char*>(buf.data()),
+                     static_cast<std::streamsize>(buf.size()));
+    const size_t got = static_cast<size_t>(m_psmf_file.gcount());
+
+    return detect_stride_from(buf.data(), got, SONY_FRAME_STRIDE);
+}
+
 // Decode the next available ATRAC3+ frame into out_pcm (S16 stereo).
 void Decoder::process_psmf_audio(AVFrame* audio_frame, std::vector<uint8_t>& out_pcm, bool flush) {
     if (!m_audio.codec_ctx) return;
 
+    const size_t stride = m_psmf_stride;
     while (true) {
         // Ensure we have at least one full frame buffered.
-        while (m_psmf_pos + SONY_FRAME_STRIDE <= m_psmf_pes.size()) {
+        while (m_psmf_pos + stride <= m_psmf_pes.size()) {
             const uint8_t* unit = m_psmf_pes.data() + m_psmf_pos;
             if (std::memcmp(unit, SONY_FRAME_HEADER, 8) != 0) {
                 // Lost sync: rescan for the next Sony header.
@@ -364,8 +417,8 @@ void Decoder::process_psmf_audio(AVFrame* audio_frame, std::vector<uint8_t>& out
             }
             av_packet_unref(m_psmf_pkt);
             m_psmf_pkt->data = const_cast<uint8_t*>(unit + 8);
-            m_psmf_pkt->size = static_cast<int>(SONY_FRAME_STRIDE - 8);
-            m_psmf_pos += SONY_FRAME_STRIDE;
+            m_psmf_pkt->size = static_cast<int>(stride - 8);
+            m_psmf_pos += stride;
 
             if (avcodec_send_packet(m_audio.codec_ctx, m_psmf_pkt) < 0) continue;
             bool got = false;

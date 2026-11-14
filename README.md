@@ -50,6 +50,26 @@ UMD Video discs use a specific filesystem structure rooted in the `UMD_VIDEO/` d
 - [ ] **Phase 4 — Menu Research**: reverse-engineer interactive menus via `.RCO` / `.VBO` overlays.
 - [ ] **Phase 5 — PPSSPP Integration**: expose a clean C-style API for native upstream integration.
 
+### Cross-disc compatibility
+
+Nothing is hardcoded to a single disc. Verified end-to-end on two very
+different Region-1/Region-2 UMD Videos — a Japanese concert disc
+(*Hatsune Miku: Project DIVA 39's Giving Day*) and a US Hollywood disc
+(*Family Guy: Blue Harvest*) — with no code changes between them:
+
+| | Miku 39's Giving Day | Family Guy: Blue Harvest |
+|---|---|---|
+| TITLE (PARAM.SFO) | ミクの日感謝祭 39's Giving Day | Family Guy: Blue Harvest |
+| `.MPS` streams | 4 (main 1648 MB) | 3 (main 533 MB) |
+| Video | H.264 720×480 @ 29.97 fps | H.264 720×480 @ 29.97 fps |
+| Audio | ATRAC3+ → 44.1 kHz stereo | ATRAC3+ → 44.1 kHz stereo |
+| ATRAC3+ stride | 696 B (detected) | 696 B (detected) |
+
+The ATRAC3+ frame stride is **measured from the stream** (histogramming the
+`0F D0 48 55` sync-word spacing) rather than assumed, so discs that use a
+different bitrate/frame size still demux correctly; 696 bytes is only the
+fallback for a stream too short to probe.
+
 ---
 
 ## 🎮 Command-Line Options

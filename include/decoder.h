@@ -16,6 +16,11 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 }
 
+// Sony PSMF ATRAC3+ framing default: an 8-byte sync header (0F D0 48 55 …)
+// followed by a payload; the 696-byte stride is the common stereo case but the
+// real value is detected per-stream (see Decoder::psmf_detect_stride).
+static constexpr size_t SONY_FRAME_STRIDE_DEFAULT = 696;
+
 struct StreamInfo {
     int             stream_index = -1;
     AVCodecContext* codec_ctx    = nullptr;
@@ -54,6 +59,11 @@ public:
     // Current playback clock in seconds, taken from the last decoded video
     // frame's PTS (falls back to the frame count / fps when PTS is missing).
     double current_time() const { return m_clock; }
+
+    // Pure helper: derive the ATRAC3+ frame stride from a raw byte window by
+    // histogramming gaps between 0F D0 48 55 sync words. Returns `fallback`
+    // when fewer than two syncs are visible. Exposed for unit testing.
+    static size_t detect_stride_from(const uint8_t* buf, size_t n, size_t fallback);
 
     bool has_video() const { return m_video.stream_index != -1; }
     bool has_audio() const { return m_audio.stream_index != -1 || m_psmf_audio; }
@@ -97,6 +107,12 @@ private:
     // seek can re-anchor the hand demuxer on a real packet boundary.
     uint64_t psmf_find_scan_offset(uint64_t target);
 
+    // Detect the ATRAC3+ frame stride (8-byte sync + payload) by measuring the
+    // distance between consecutive 0F D0 48 55 sync words in the stream. UMD
+    // Video discs are not all 696 bytes (that is the 176.4 KB/s stereo case);
+    // reading the real spacing keeps every bitrate working.
+    size_t psmf_detect_stride();
+
     // Decode the next video frame from the FFmpeg demuxer, discarding packets
     // that belong to no tracked stream. Used by the PSMF interleave path.
     FrameType decode_video_frame(AVFrame* out);
@@ -116,6 +132,7 @@ private:
     uint64_t             m_psmf_cursor  = 0;   // next MPEG-PS packet offset (relative to base)
     std::vector<uint8_t> m_psmf_pes;           // buffered concatenated 0xBD payloads
     size_t               m_psmf_pos     = 0;   // parse cursor inside m_psmf_pes
+    size_t               m_psmf_stride  = SONY_FRAME_STRIDE_DEFAULT; // detected stride
     int64_t              m_psmf_samples = 0;   // PCM samples emitted so far
     int64_t              m_vcount       = 0;   // video frames emitted (A/V pacing)
     std::vector<uint8_t> m_psmf_scan;          // reusable read buffer

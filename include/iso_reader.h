@@ -56,6 +56,17 @@ public:
     // Parsed PARAM.SFO (TITLE / DISC_ID / CATEGORY). Empty if absent.
     const ParamSfo& param() const { return m_param; }
 
+    // Number of metadata files (PARAM.SFO/ICON0.PNG/...) found in UMD_VIDEO/.
+    size_t metadata_count() const { return m_metadata.size(); }
+
+    // Names of all metadata files found in UMD_VIDEO/ (for reporting).
+    std::vector<std::string> metadata_names() const {
+        std::vector<std::string> names;
+        names.reserve(m_metadata.size());
+        for (const auto& f : m_metadata) names.push_back(f.name);
+        return names;
+    }
+
     // Raw bytes of a named metadata file ("" if not present on this disc).
     std::vector<uint8_t> read_metadata(const std::string& filename) const;
     bool has_metadata(const std::string& filename) const;

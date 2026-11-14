@@ -89,8 +89,9 @@ void print_disc_summary(const DiscItem& d) {
     std::cout << "[*] Disc: " << (d.title.empty() ? "(untitled)" : d.title) << "\n";
     std::cout << "    DISC_ID : " << (d.disc_id.empty()  ? "(none)" : d.disc_id)  << "\n";
     std::cout << "    CATEGORY: " << (d.category.empty() ? "(none)" : d.category) << "\n";
-    std::cout << "    ICON0   : " << (d.icon ? "loaded" : "absent") << "\n";
-    std::cout << "    PIC1    : " << (d.pic1 ? "loaded" : "absent") << "\n";
+    std::cout << "    ICON0   : " << (d.has_icon ? "present" : "absent") << "\n";
+    std::cout << "    PIC1    : " << (d.has_pic1 ? "present" : "absent") << "\n";
+    std::cout << "    SND0    : " << (d.has_snd0 ? "present" : "absent") << "\n";
     std::cout << "    Streams : " << d.streams.size() << "\n";
     for (const auto& s : d.streams) {
         std::cout << "      - " << (s.is_main ? "[MAIN] " : "       ") << s.name
@@ -131,6 +132,9 @@ bool load_iso(const std::string& path, LibraryItem& out) {
     d.title    = reader.param().title;
     d.disc_id  = reader.param().disc_id;
     d.category = reader.param().category;
+    d.has_icon = reader.has_metadata("ICON0.PNG");
+    d.has_pic1 = reader.has_metadata("PIC1.PNG");
+    d.has_snd0 = reader.has_metadata("SND0.AT3");
 
     uint32_t max_size = 0;
     for (const auto& e : entries) max_size = std::max(max_size, e.size_bytes);
