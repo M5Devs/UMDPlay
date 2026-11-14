@@ -42,6 +42,8 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "[+] Stream successfully opened in memory!\n";
+    std::cout << "[*] Tracks: video=" << (decoder.has_video() ? "yes" : "no")
+              << " audio=" << (decoder.has_audio() ? "yes (ATRAC3+)" : "no") << "\n";
 
     UiManager ui;
     std::string title = "UMDPlay - " + main_feature->name;
