@@ -42,14 +42,19 @@ jobs:
 
       - name: Verify 10-foot UI Renders (Xvfb)
         # --demo renders the hub with synthetic data (no copyrighted assets),
-        # so this catches UI/ImGui regressions on every run.
+        # so this catches UI/ImGui regressions on every run. Each strip is
+        # rendered to prove the whole shell lays out headlessly.
         run: |
-          xvfb-run -a -s "-screen 0 1280x720x24" \
-            ./build/bin/umdplay --demo --screenshot /tmp/wmc_ui.png
-          ls -lh /tmp/wmc_ui.png
+          for strip in recent browse settings; do
+            xvfb-run -a -s "-screen 0 1280x720x24" \
+              ./build/bin/umdplay --demo --strip "$strip" \
+                                  --screenshot "/tmp/wmc_ui_${strip}.png"
+            test -s "/tmp/wmc_ui_${strip}.png"
+            ls -lh "/tmp/wmc_ui_${strip}.png"
+          done
 
-      - name: Upload UI Screenshot
+      - name: Upload UI Screenshots
         uses: actions/upload-artifact@v4
         with:
           name: wmc-ui-preview
-          path: /tmp/wmc_ui.png
+          path: /tmp/wmc_ui_*.png

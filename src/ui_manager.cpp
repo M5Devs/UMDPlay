@@ -113,10 +113,42 @@ void UiManager::set_window_size(int w, int h) {
     if (m_window) SDL_SetWindowSize(m_window, w, h);
 }
 
-void UiManager::queue_audio(const uint8_t* data, uint32_t len) {
-    if (m_audio_dev != 0 && data && len > 0) {
-        SDL_QueueAudio(m_audio_dev, data, len);
+void UiManager::set_fullscreen(bool on) {
+    if (!m_window) return;
+    if (on == m_fullscreen) return;
+    if (SDL_SetWindowFullscreen(m_window,
+            on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) == 0) {
+        m_fullscreen = on;
     }
+}
+
+bool UiManager::toggle_fullscreen() {
+    set_fullscreen(!m_fullscreen);
+    return m_fullscreen;
+}
+
+void UiManager::set_volume(float v) {
+    m_volume = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+}
+
+void UiManager::queue_audio(const uint8_t* data, uint32_t len) {
+    if (m_audio_dev == 0 || !data || len == 0) return;
+
+    if (m_muted || m_volume <= 0.0f) return;
+    if (m_volume >= 1.0f) {
+        SDL_QueueAudio(m_audio_dev, data, len);
+        return;
+    }
+
+    // Scale S16 stereo samples in place into a scratch buffer.
+    const size_t samples = len / sizeof(int16_t);
+    m_audio_scratch.resize(len);
+    const int16_t* src = reinterpret_cast<const int16_t*>(data);
+    int16_t* dst = reinterpret_cast<int16_t*>(m_audio_scratch.data());
+    for (size_t i = 0; i < samples; ++i) {
+        dst[i] = static_cast<int16_t>(src[i] * m_volume);
+    }
+    SDL_QueueAudio(m_audio_dev, m_audio_scratch.data(), len);
 }
 
 UserAction UiManager::handle_events() {

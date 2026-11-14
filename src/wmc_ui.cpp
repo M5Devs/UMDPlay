@@ -21,6 +21,10 @@ constexpr ImU32 kAccent      = IM_COL32(120, 200, 255, 255);
 constexpr ImU32 kTextPrimary = IM_COL32(240, 248, 255, 255);
 constexpr ImU32 kTextDim     = IM_COL32(170, 196, 226, 255);
 
+// Bullet separator (U+2022), used between header words. Guaranteed to be in the
+// glyph range via the sample string passed to init().
+constexpr const char* kBullet = "\xE2\x80\xA2";
+
 // Fonts probed in order of preference; first hit wins. Noto Sans CJK gives us
 // the Japanese glyphs PARAM.SFO titles frequently contain.
 const char* kFontCandidates[] = {
@@ -57,6 +61,18 @@ void format_time(double s, char* buf, size_t n) {
     std::snprintf(buf, n, "%d:%02d", total / 60, total % 60);
 }
 
+std::string human_size(uint32_t bytes) {
+    char buf[32];
+    const double mb = bytes / (1024.0 * 1024.0);
+    if (mb >= 1000.0) std::snprintf(buf, sizeof(buf), "%.1f GB", mb / 1024.0);
+    else              std::snprintf(buf, sizeof(buf), "%.0f MB", mb);
+    return buf;
+}
+
+// Footer reserve: nothing else may draw below this y (keeps the key-hint bar
+// clear of cards and text at every window size).
+float footer_top(float h) { return h - 56.0f; }
+
 }  // namespace
 
 WmcUi::WmcUi() {}
@@ -81,6 +97,8 @@ bool WmcUi::init(SDL_Window* window, SDL_Renderer* renderer,
     {
         ImFontGlyphRangesBuilder b;
         b.AddRanges(io.Fonts->GetGlyphRangesDefault());
+        // Always include the bullet (U+2022) and en/em dashes used in labels.
+        b.AddText("\xE2\x80\xA2\xE2\x80\x93\xE2\x80\x94");
         if (!glyph_sample.empty()) b.AddText(glyph_sample.c_str());
         b.BuildRanges(&ranges);
     }
@@ -217,7 +235,7 @@ void WmcUi::draw_background(ImDrawList* dl, float w, float h, float t,
 
 void WmcUi::draw_card(ImDrawList* dl, const DiscItem& disc, float cx, float cy,
                       float w, float h, float focus, bool selected, float t) {
-    const float scale = lerp(0.84f, 1.0f, focus);
+    const float scale = lerp(0.86f, 1.0f, focus);
     const float cw = w * scale, ch = h * scale;
     const ImVec2 p0(cx - cw * 0.5f, cy - ch * 0.5f);
     const ImVec2 p1(cx + cw * 0.5f, cy + ch * 0.5f);
@@ -229,13 +247,18 @@ void WmcUi::draw_card(ImDrawList* dl, const DiscItem& disc, float cx, float cy,
     const ImU32 bot = with_alpha(IM_COL32(10, 26, 60, 255),  lerp(0.5f, 1.0f, focus));
     dl->AddRectFilledMultiColor(p0, p1, top, top, bot, bot);
 
-    // Cover art.
+    // Cover art (or a simple disc glyph when the disc has no ICON0).
+    const float pad = cw * 0.10f;
+    const float art = cw - pad * 2.0f;
+    const ImVec2 a0(p0.x + pad, p0.y + pad);
+    const ImVec2 a1(a0.x + art, a0.y + art * 0.62f);
     if (disc.icon) {
-        const float pad = cw * 0.10f;
-        const float art = cw - pad * 2.0f;
-        const ImVec2 a0(p0.x + pad, p0.y + pad);
-        const ImVec2 a1(a0.x + art, a0.y + art * 0.62f);
         dl->AddImage(reinterpret_cast<ImTextureID>(disc.icon), a0, a1);
+    } else {
+        dl->AddRectFilled(a0, a1, IM_COL32(18, 42, 84, 220), 6.0f);
+        const ImVec2 cc((a0.x + a1.x) * 0.5f, (a0.y + a1.y) * 0.5f);
+        dl->AddCircle(cc, art * 0.22f, with_alpha(kGlassHi, 0.55f), 0, 2.5f);
+        dl->AddCircleFilled(cc, art * 0.06f, with_alpha(kGlassHi, 0.55f));
     }
 
     // Glass border + highlight glow on the active card.
@@ -248,21 +271,234 @@ void WmcUi::draw_card(ImDrawList* dl, const DiscItem& disc, float cx, float cy,
     }
 
     // Title + disc id under the art.
-    const float ty = p1.y - ch * 0.26f;
+    const float ty = p1.y - ch * 0.28f;
     const char* title = disc.title.empty() ? "(untitled disc)" : disc.title.c_str();
-    dl->AddText(m_font_body, 17.0f, ImVec2(p0.x + 12, ty),
+    dl->AddText(m_font_body, 16.0f, ImVec2(p0.x + 12, ty),
                 with_alpha(kTextPrimary, lerp(0.55f, 1.0f, focus)), title);
     if (!disc.disc_id.empty()) {
-        dl->AddText(m_font_body, 14.0f, ImVec2(p0.x + 12, ty + 24),
+        dl->AddText(m_font_body, 13.0f, ImVec2(p0.x + 12, ty + 22),
                     with_alpha(kTextDim, lerp(0.45f, 1.0f, focus)),
                     disc.disc_id.c_str());
     }
 }
 
-WmcInput WmcUi::render_hub(const std::vector<DiscItem>& discs,
-                           int& selected_disc, int& selected_stream, float t) {
+void WmcUi::draw_strip_tabs(ImDrawList* dl, float w, float y, HubMode strip, float t) {
+    (void)t;
+    struct Tab { const char* label; HubMode mode; };
+    const Tab tabs[] = {
+        {"Recent Discs",   HubMode::Recent},
+        {"Browse System",  HubMode::Browse},
+        {"Options",        HubMode::Settings},
+    };
+    const int n = static_cast<int>(sizeof(tabs) / sizeof(tabs[0]));
+    const float tab_w = std::min(w * 0.15f, 188.0f);
+    const float gap = 10.0f;
+    const float total = n * tab_w + (n - 1) * gap;
+    float x = w - 64.0f - total;   // right-aligned, clear of the top-left logo
+    for (int i = 0; i < n; ++i) {
+        const ImVec2 r0(x, y), r1(x + tab_w, y + 40.0f);
+        const bool active = (tabs[i].mode == strip);
+        if (active) {
+            dl->AddRectFilled(r0, r1, with_alpha(kCobaltGlow, 0.34f), 9.0f);
+            dl->AddRect(r0, r1, with_alpha(kAccent, 0.85f), 9.0f, 0, 1.8f);
+        } else {
+            dl->AddRectFilled(r0, r1, IM_COL32(12, 30, 62, 150), 9.0f);
+            dl->AddRect(r0, r1, with_alpha(kGlassHi, 0.18f), 9.0f);
+        }
+        const ImVec2 ts = ImGui::CalcTextSize(tabs[i].label);
+        const float sc = 17.0f / ImGui::GetFontSize();
+        dl->AddText(m_font_body, 17.0f,
+                    ImVec2(r0.x + (tab_w - ts.x * sc) * 0.5f, r0.y + 10.0f),
+                    active ? kTextPrimary : kTextDim, tabs[i].label);
+        x += tab_w + gap;
+    }
+}
+
+void WmcUi::draw_action_panel(ImDrawList* dl, float x, float y, float w,
+                              const DiscItem& disc, int action_sel, bool extras_open,
+                              int extras_sel, int bonus_count) {
+    const float row_h = 44.0f;
+    const float gap = 10.0f;
+
+    // --- Extras sub-page: replace the action rows so the panel stays bounded
+    // and can never push into the footer key-hint bar. ---
+    if (extras_open && bonus_count > 0) {
+        dl->AddText(m_font_body, 15.0f, ImVec2(x + 6, y), with_alpha(kTextDim, 0.95f),
+                    "BONUS CLIPS");
+        float ry = y + 24.0f;
+        int bonus_i = 0;
+        for (const auto& s : disc.streams) {
+            if (s.is_main) continue;
+            const bool active = (bonus_i == extras_sel);
+            const ImVec2 r0(x, ry), r1(x + w, ry + row_h - 4.0f);
+            if (active) {
+                dl->AddRectFilled(r0, r1, with_alpha(kCobaltGlow, 0.32f), 8.0f);
+                dl->AddRect(r0, r1, with_alpha(kAccent, 0.9f), 8.0f, 0, 1.8f);
+            } else {
+                dl->AddRectFilled(r0, r1, IM_COL32(10, 24, 52, 160), 8.0f);
+                dl->AddRect(r0, r1, with_alpha(kGlassHi, 0.16f), 8.0f);
+            }
+            char label[64];
+            std::snprintf(label, sizeof(label), "Bonus Clip %d", bonus_i + 1);
+            dl->AddText(m_font_body, 18.0f, ImVec2(r0.x + 16, ry + 9),
+                        active ? kTextPrimary : with_alpha(kTextPrimary, 0.82f), label);
+            const std::string sz = human_size(s.size_bytes);
+            const ImVec2 ds = ImGui::CalcTextSize(sz.c_str());
+            const float sc = 14.0f / ImGui::GetFontSize();
+            dl->AddText(m_font_body, 14.0f, ImVec2(r1.x - 16 - ds.x * sc, ry + 13),
+                        kTextDim, sz.c_str());
+            ry += row_h;
+            ++bonus_i;
+        }
+        return;
+    }
+
+    int main_idx = 0;
+    for (size_t i = 0; i < disc.streams.size(); ++i) {
+        if (disc.streams[i].is_main) { main_idx = static_cast<int>(i); break; }
+    }
+    const std::string main_size =
+        disc.streams.empty() ? std::string("--") : human_size(disc.streams[main_idx].size_bytes);
+
+    struct Row { const char* label; std::string detail; bool enabled; };
+    std::vector<Row> rows;
+    rows.push_back({"Play", "Main Feature " + main_size, !disc.streams.empty()});
+    if (bonus_count > 0)
+        rows.push_back({"Extras", std::to_string(bonus_count) + " bonus clip(s)", true});
+    rows.push_back({"Options", "Display & audio", true});
+
+    float ry = y;
+    for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+        const bool active = (i == action_sel);
+        const ImVec2 r0(x, ry), r1(x + w, ry + row_h);
+        if (active) {
+            dl->AddRectFilled(r0, r1, with_alpha(kCobaltGlow, 0.32f), 8.0f);
+            dl->AddRect(r0, r1, with_alpha(kAccent, 0.9f), 8.0f, 0, 1.8f);
+        } else {
+            dl->AddRectFilled(r0, r1, IM_COL32(12, 30, 62, 160), 8.0f);
+            dl->AddRect(r0, r1, with_alpha(kGlassHi, 0.16f), 8.0f);
+        }
+        const ImU32 fg = rows[i].enabled
+                             ? (active ? kTextPrimary : with_alpha(kTextPrimary, 0.82f))
+                             : with_alpha(kTextDim, 0.5f);
+        dl->AddText(m_font_body, 18.0f, ImVec2(r0.x + 16, ry + 11), fg, rows[i].label);
+        const ImVec2 ds = ImGui::CalcTextSize(rows[i].detail.c_str());
+        const float sc = 14.0f / ImGui::GetFontSize();
+        dl->AddText(m_font_body, 14.0f,
+                    ImVec2(r1.x - 16 - ds.x * sc, ry + 15), with_alpha(kTextDim, 0.9f),
+                    rows[i].detail.c_str());
+        ry += row_h + gap;
+    }
+}
+
+void WmcUi::draw_browse_panel(ImDrawList* dl, float x, float y, float w,
+                              const std::string& path,
+                              const std::vector<BrowseEntry>& entries,
+                              int browse_sel, float scroll) {
+    const float row_h = 34.0f;
+    const int visible = 8;
+    const ImVec2 r0(x, y), r1(x + w, y + row_h * visible + 16.0f);
+    dl->AddRectFilled(r0, r1, IM_COL32(8, 20, 46, 210), 10.0f);
+    dl->AddRect(r0, r1, with_alpha(kGlassHi, 0.22f), 10.0f);
+
+    dl->AddText(m_font_body, 14.0f, ImVec2(x + 14, y + 8),
+                with_alpha(kTextDim, 0.95f), ("PATH  " + path).c_str());
+
+    if (entries.empty()) {
+        dl->AddText(m_font_body, 16.0f, ImVec2(x + 16, y + 40),
+                    with_alpha(kTextDim, 0.8f), "(no folders or .iso files here)");
+        return;
+    }
+
+    const int first = std::clamp(browse_sel - visible / 2, 0,
+                                 std::max(0, static_cast<int>(entries.size()) - visible));
+    (void)scroll;
+    float ry = y + 32.0f;
+    for (int i = first; i < std::min<int>(first + visible, static_cast<int>(entries.size())); ++i) {
+        const BrowseEntry& e = entries[i];
+        const bool active = (i == browse_sel);
+        const ImVec2 a(x + 8, ry), b(x + w - 8, ry + row_h - 4.0f);
+        if (active) {
+            dl->AddRectFilled(a, b, with_alpha(kCobaltGlow, 0.30f), 6.0f);
+            dl->AddRect(a, b, with_alpha(kAccent, 0.85f), 6.0f, 0, 1.5f);
+        }
+        const char* glyph = e.is_dir ? "[DIR]" : (e.is_iso ? "[ISO]" : "     ");
+        dl->AddText(m_font_body, 16.0f, ImVec2(a.x + 10, ry + 6),
+                    active ? kTextPrimary : with_alpha(kTextPrimary, 0.8f), glyph);
+        std::string name = e.name;
+        if (name.size() > 52) name = name.substr(0, 49) + "...";
+        dl->AddText(m_font_body, 16.0f, ImVec2(a.x + 66, ry + 6),
+                    active ? kTextPrimary : with_alpha(kTextPrimary, 0.82f), name.c_str());
+        ry += row_h;
+    }
+    if (static_cast<int>(entries.size()) > visible) {
+        char cnt[32];
+        std::snprintf(cnt, sizeof(cnt), "%d items", static_cast<int>(entries.size()));
+        dl->AddText(m_font_body, 13.0f, ImVec2(x + w - 90, y + 8),
+                    with_alpha(kTextDim, 0.8f), cnt);
+    }
+}
+
+void WmcUi::draw_settings_panel(ImDrawList* dl, float x, float y, float w,
+                                int setting_sel, bool fullscreen, float volume,
+                                bool muted) {
+    const float row_h = 52.0f;
+    const float gap = 10.0f;
+    const char* labels[3] = {"Display Mode", "Volume", "Mute"};
+    char values[3][48];
+    std::snprintf(values[0], sizeof(values[0]), "%s", fullscreen ? "Fullscreen" : "Windowed");
+    std::snprintf(values[1], sizeof(values[1]), "%d%%", static_cast<int>(volume * 100.0f + 0.5f));
+    std::snprintf(values[2], sizeof(values[2]), "%s", muted ? "On" : "Off");
+
+    float ry = y;
+    for (int i = 0; i < 3; ++i) {
+        const bool active = (i == setting_sel);
+        const ImVec2 r0(x, ry), r1(x + w, ry + row_h);
+        if (active) {
+            dl->AddRectFilled(r0, r1, with_alpha(kCobaltGlow, 0.32f), 8.0f);
+            dl->AddRect(r0, r1, with_alpha(kAccent, 0.9f), 8.0f, 0, 1.8f);
+        } else {
+            dl->AddRectFilled(r0, r1, IM_COL32(12, 30, 62, 160), 8.0f);
+            dl->AddRect(r0, r1, with_alpha(kGlassHi, 0.16f), 8.0f);
+        }
+        dl->AddText(m_font_body, 18.0f, ImVec2(r0.x + 16, ry + 15),
+                    active ? kTextPrimary : with_alpha(kTextPrimary, 0.85f), labels[i]);
+
+        if (i == 1) {
+            // Volume bar.
+            const float bx0 = r0.x + w * 0.46f, bx1 = r1.x - 110.0f, by = ry + 23.0f;
+            dl->AddRectFilled(ImVec2(bx0, by), ImVec2(bx1, by + 6),
+                              with_alpha(kTextDim, 0.35f), 3.0f);
+            dl->AddRectFilled(ImVec2(bx0, by), ImVec2(bx0 + (bx1 - bx0) * std::clamp(volume, 0.f, 1.f), by + 6),
+                              with_alpha(kAccent, 1.0f), 3.0f);
+            dl->AddCircleFilled(ImVec2(bx0 + (bx1 - bx0) * std::clamp(volume, 0.f, 1.f), by + 3),
+                                7.0f, kTextPrimary);
+        }
+        const ImVec2 vs = ImGui::CalcTextSize(values[i]);
+        const float sc = 17.0f / ImGui::GetFontSize();
+        dl->AddText(m_font_body, 17.0f, ImVec2(r1.x - 20 - vs.x * sc, ry + 16),
+                    active ? kTextPrimary : kTextDim, values[i]);
+        ry += row_h + gap;
+    }
+}
+
+void WmcUi::draw_footer(ImDrawList* dl, float w, float h, const std::string& hint) {
+    const float ft = footer_top(h);
+    dl->AddRectFilled(ImVec2(0, ft), ImVec2(w, h), IM_COL32(3, 8, 20, 200));
+    dl->AddLine(ImVec2(0, ft), ImVec2(w, ft), with_alpha(kGlassHi, 0.18f), 1.0f);
+    dl->AddText(m_font_body, 15.0f, ImVec2(48, ft + 18), with_alpha(kTextDim, 0.95f),
+                hint.c_str());
+}
+
+WmcInput WmcUi::render_hub(HubMode& strip,
+                           const std::vector<DiscItem>& recent, int& recent_sel,
+                           const std::vector<BrowseEntry>& browse, int& browse_sel,
+                           const std::string& browse_path,
+                           int& action_sel, bool& extras_open, int& extras_sel,
+                           int& setting_sel,
+                           bool fullscreen, float volume, bool muted, float t) {
     WmcInput out;
-    if (!m_imgui_ready || discs.empty()) return out;
+    if (!m_imgui_ready) return out;
 
     ImGuiIO& io = ImGui::GetIO();
     const float w = io.DisplaySize.x, h = io.DisplaySize.y;
@@ -274,110 +510,241 @@ WmcInput WmcUi::render_hub(const std::vector<DiscItem>& discs,
                  ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    const DiscItem& sel = discs[std::clamp(selected_disc, 0,
-                                           static_cast<int>(discs.size()) - 1)];
-    draw_background(dl, w, h, t, sel.pic1);
+    // Focus model: 0 = strip tabs, 1 = card row, 2 = panel rows.
+    // Changing strips resets focus to the card row.
+    if (strip != m_last_strip) { m_focus = 1; extras_open = false; m_last_strip = strip; }
+    m_focus = std::clamp(m_focus, 0, 2);
 
-    // --- Keyboard / gamepad navigation ---
-    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true) && selected_disc > 0) selected_disc--;
-    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true) &&
-        selected_disc + 1 < static_cast<int>(discs.size())) selected_disc++;
-    const int nstreams = static_cast<int>(sel.streams.size());
-    if (nstreams > 0) {
-        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true) && selected_stream > 0) selected_stream--;
-        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true) && selected_stream + 1 < nstreams) selected_stream++;
-    } else {
-        selected_stream = 0;
+    const DiscItem* sel = nullptr;
+    if (strip == HubMode::Recent && !recent.empty()) {
+        recent_sel = std::clamp(recent_sel, 0, static_cast<int>(recent.size()) - 1);
+        sel = &recent[recent_sel];
     }
-    if (ImGui::IsKeyPressed(ImGuiKey_Enter, true) ||
-        ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, true) ||
-        ImGui::IsKeyPressed(ImGuiKey_Space, true)) {
-        out.action = WmcAction::Play;
+    draw_background(dl, w, h, t, sel ? sel->pic1 : nullptr);
+
+    // Read each key at most once per frame so a focus change cannot also be
+    // consumed by the block it just moved into.
+    bool used_l = false, used_r = false, used_u = false, used_d = false, used_e = false;
+    auto take_l = [&] { if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true) && !used_l) { used_l = true; return true; } return false; };
+    auto take_r = [&] { if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true) && !used_r) { used_r = true; return true; } return false; };
+    auto take_u = [&] { if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true) && !used_u) { used_u = true; return true; } return false; };
+    auto take_d = [&] { if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true) && !used_d) { used_d = true; return true; } return false; };
+    auto take_e = [&] { if ((ImGui::IsKeyPressed(ImGuiKey_Enter, true) ||
+                             ImGui::IsKeyPressed(ImGuiKey_Space, true)) && !used_e) { used_e = true; return true; } return false; };
+
+    // --- focus 0: strip tabs ---
+    if (m_focus == 0) {
+        if (take_l() && strip != HubMode::Recent) {
+            strip = (strip == HubMode::Settings) ? HubMode::Browse : HubMode::Recent;
+        }
+        if (take_r() && strip != HubMode::Settings) {
+            strip = (strip == HubMode::Recent) ? HubMode::Browse : HubMode::Settings;
+        }
+        if (take_d()) m_focus = 1;
     }
+
+    draw_strip_tabs(dl, w, 22.0f, strip, t);
 
     // --- Header ---
-    dl->AddText(m_font_huge, 40.0f, ImVec2(64, 40), kTextPrimary, "UMDPlay");
-    dl->AddText(m_font_body, 17.0f, ImVec2(66, 88), kTextDim,
-                "UMD VIDEO  \xE2\x80\xA2  PRESERVATION LIBRARY");
-    dl->AddLine(ImVec2(64, 118), ImVec2(w - 64, 118), with_alpha(kGlassHi, 0.25f), 1.5f);
+    dl->AddText(m_font_huge, 36.0f, ImVec2(64, 28), kTextPrimary, "UMDPlay");
+    dl->AddText(m_font_body, 15.0f, ImVec2(66, 72), kTextDim,
+                (std::string("UMD VIDEO  ") + kBullet + "  PRESERVATION LIBRARY").c_str());
+    dl->AddLine(ImVec2(64, 98), ImVec2(w - 64, 98), with_alpha(kGlassHi, 0.22f), 1.5f);
 
-    // --- Smooth lerped carousel ---
-    const float target = static_cast<float>(selected_disc);
-    m_scroll = lerp(m_scroll, target, std::clamp(io.DeltaTime * 8.0f, 0.0f, 1.0f));
-
-    const float card_w = std::min(w * 0.24f, 300.0f);
-    const float card_h = card_w * 1.16f;
-    const float cy = 118 + (h * 0.42f - 118) * 0.5f + card_h * 0.28f;
-    const float spacing = card_w * 1.16f;
+    // --- Carousel row ---
+    const float card_w = std::min(w * 0.19f, 232.0f);
+    const float card_h = card_w * 1.18f;
+    const float cy = 100.0f + card_h * 0.5f + 22.0f;
+    const float spacing = card_w * 1.14f;
     const float cx_center = w * 0.5f;
+    const bool on_cards = (m_focus == 1);
 
-    for (int i = 0; i < static_cast<int>(discs.size()); ++i) {
-        const float cx = cx_center + (static_cast<float>(i) - m_scroll) * spacing;
-        if (cx < -card_w || cx > w + card_w) continue;
-        const float dist = std::fabs(static_cast<float>(i) - m_scroll);
-        const float focus = std::clamp(1.0f - dist * 0.55f, 0.0f, 1.0f);
-        draw_card(dl, discs[i], cx, cy, card_w, card_h, focus, i == selected_disc, t);
-    }
-
-    // --- Info panel: title, metadata, stream list ---
-    const float panel_y = cy + card_h * 0.5f + 22.0f;
-    const char* title = sel.title.empty() ? "(untitled disc)" : sel.title.c_str();
-    const float title_px = 26.0f;
-    const float tw = ImGui::CalcTextSize(title).x * (title_px / ImGui::GetFontSize());
-    dl->AddText(m_font_title, title_px, ImVec2((w - tw) * 0.5f, panel_y),
-                kTextPrimary, title);
-
-    // Metadata chips.
-    {
-        char meta[160];
-        std::snprintf(meta, sizeof(meta), "%s    %s",
-                      sel.disc_id.empty()  ? "DISC_ID: --" : sel.disc_id.c_str(),
-                      sel.category.empty() ? "CAT: --"     : sel.category.c_str());
-        const float mw = ImGui::CalcTextSize(meta).x * (16.0f / ImGui::GetFontSize());
-        dl->AddText(m_font_body, 16.0f, ImVec2((w - mw) * 0.5f, panel_y + 34),
-                    kTextDim, meta);
-    }
-
-    // Stream list, centered, with the main feature highlighted.
-    float sy = panel_y + 64.0f;
-    const float list_w = std::min(w * 0.42f, 560.0f);
-    const float list_x = w * 0.5f - list_w * 0.5f;
-    for (int i = 0; i < nstreams; ++i) {
-        const StreamItem& s = sel.streams[i];
-        const bool active = (i == selected_stream);
-        const ImVec2 r0(list_x, sy);
-        const ImVec2 r1(list_x + list_w, sy + 28.0f);
-        if (active) {
-            dl->AddRectFilled(r0, r1, with_alpha(kCobaltGlow, 0.30f), 6.0f);
-            dl->AddRect(r0, r1, with_alpha(kGlassHi, 0.55f), 6.0f);
-        } else if (s.is_main) {
-            dl->AddRectFilled(r0, r1, with_alpha(kAccent, 0.10f), 6.0f);
+    if (strip == HubMode::Recent) {
+        if (recent.empty()) {
+            dl->AddText(m_font_body, 17.0f, ImVec2(cx_center - 190, cy - 8),
+                        with_alpha(kTextDim, 0.85f),
+                        "No recent discs yet - open one from Browse System.");
         }
-        char line[192];
-        std::snprintf(line, sizeof(line), "%s  %-12s  %5u MB",
-                      s.is_main ? "[MAIN]" : "      ", s.name.c_str(),
-                      s.size_bytes / (1024u * 1024u));
-        dl->AddText(m_font_body, 16.0f, ImVec2(r0.x + 12, sy + 6),
-                    active ? kTextPrimary : kTextDim, line);
-        sy += 32.0f;
+        m_scroll = lerp(m_scroll, static_cast<float>(recent_sel),
+                        std::clamp(io.DeltaTime * 8.0f, 0.0f, 1.0f));
+        for (int i = 0; i < static_cast<int>(recent.size()); ++i) {
+            const float cx = cx_center + (static_cast<float>(i) - m_scroll) * spacing;
+            if (cx < -card_w || cx > w + card_w) continue;
+            const float dist = std::fabs(static_cast<float>(i) - m_scroll);
+            const float focus = std::clamp(1.0f - dist * 0.5f, 0.0f, 1.0f);
+            draw_card(dl, recent[i], cx, cy, card_w, card_h, focus,
+                      (i == recent_sel) && on_cards, t);
+        }
+        if (on_cards) {
+            if (take_l() && recent_sel > 0) recent_sel--;
+            if (take_r() && recent_sel + 1 < static_cast<int>(recent.size())) recent_sel++;
+            if (take_e() && sel) { out.action = WmcAction::OpenIso; out.iso_path = sel->iso_path; }
+            if (take_u()) m_focus = 0;
+            if (take_d()) m_focus = 2;
+        }
+    } else if (strip == HubMode::Browse) {
+        m_scroll = lerp(m_scroll, static_cast<float>(browse_sel),
+                        std::clamp(io.DeltaTime * 8.0f, 0.0f, 1.0f));
+        for (int i = 0; i < static_cast<int>(browse.size()); ++i) {
+            const float cx = cx_center + (static_cast<float>(i) - m_scroll) * spacing;
+            if (cx < -card_w || cx > w + card_w) continue;
+            const float dist = std::fabs(static_cast<float>(i) - m_scroll);
+            const float focus = std::clamp(1.0f - dist * 0.5f, 0.0f, 1.0f);
+            const BrowseEntry& e = browse[i];
+            DiscItem tmp;
+            tmp.title = e.name;
+            tmp.disc_id = e.is_dir ? "Folder" : (e.is_iso ? "UMD ISO" : "File");
+            draw_card(dl, tmp, cx, cy, card_w, card_h, focus,
+                      (i == browse_sel) && on_cards, t);
+        }
+        if (on_cards) {
+            if (take_l() && browse_sel > 0) browse_sel--;
+            if (take_r() && browse_sel + 1 < static_cast<int>(browse.size())) browse_sel++;
+            if (take_e() && browse_sel >= 0 && browse_sel < static_cast<int>(browse.size())) {
+                const BrowseEntry& e = browse[browse_sel];
+                if (e.is_dir) { out.action = WmcAction::BrowseEnter; out.iso_path = e.path; }
+                else if (e.is_iso) { out.action = WmcAction::OpenIso; out.iso_path = e.path; }
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Backspace, true)) out.action = WmcAction::BrowseUp;
+            if (take_u()) m_focus = 0;
+            if (take_d()) m_focus = 2;
+        }
     }
 
-    // --- Footer hints ---
-    dl->AddText(m_font_body, 15.0f, ImVec2(64, h - 34), kTextDim,
-                "LEFT / RIGHT  browse      UP / DOWN  select stream      "
-                "ENTER  play      ESC / Q  quit");
+    // --- Lower panel ---
+    const float panel_top = footer_top(h) - 8.0f;
+    const float panel_y = cy + card_h * 0.5f + 16.0f;
+    const float panel_w = std::min(w * 0.62f, 760.0f);
+    const float panel_x = (w - panel_w) * 0.5f;
+    const float avail = std::max(0.0f, panel_top - panel_y);
+
+    // Hard clip: the lower panel can never draw over the footer key-hint bar,
+    // no matter the window size or how many rows a disc has.
+    dl->PushClipRect(ImVec2(0, panel_y), ImVec2(w, panel_top), true);
+
+    if (strip == HubMode::Recent) {
+        const char* title = sel ? (sel->title.empty() ? "(untitled disc)" : sel->title.c_str())
+                                : "(no disc selected)";
+        const float title_px = 23.0f;
+        const float tw = ImGui::CalcTextSize(title).x * (title_px / ImGui::GetFontSize());
+        dl->AddText(m_font_title, title_px, ImVec2((w - tw) * 0.5f, panel_y),
+                    kTextPrimary, title);
+        if (sel && !sel->disc_id.empty()) {
+            const float mw = ImGui::CalcTextSize(sel->disc_id.c_str()).x * (14.0f / ImGui::GetFontSize());
+            dl->AddText(m_font_body, 14.0f, ImVec2((w - mw) * 0.5f, panel_y + 28),
+                        kTextDim, sel->disc_id.c_str());
+        }
+        int bonus = 0;
+        if (sel) for (const auto& s : sel->streams) if (!s.is_main) ++bonus;
+        const float ap_y = panel_y + 54.0f;
+        const float ap_avail = std::max(0.0f, panel_top - ap_y);
+        if (ap_avail > 56.0f && sel) {
+            const int nrows = 2 + (bonus > 0 ? 1 : 0);
+            action_sel = std::clamp(action_sel, 0, nrows - 1);
+            draw_action_panel(dl, panel_x, ap_y, panel_w, *sel, action_sel,
+                              extras_open, extras_sel, bonus);
+            if (m_focus == 2) {
+                if (extras_open) {
+                    if (take_u() && extras_sel > 0) extras_sel--;
+                    if (take_d() && extras_sel + 1 < bonus) extras_sel++;
+                    if (take_l() || take_r()) extras_open = false;
+                    if (take_e()) {
+                        int b = 0;
+                        for (int i = 0; i < static_cast<int>(sel->streams.size()); ++i) {
+                            if (sel->streams[i].is_main) continue;
+                            if (b == extras_sel) { out.action = WmcAction::PlayStream; out.stream_index = i; break; }
+                            ++b;
+                        }
+                    }
+                    if (ImGui::IsKeyPressed(ImGuiKey_Escape, true)) extras_open = false;
+                } else {
+                    const int options_idx = nrows - 1;
+                    if (take_u()) {
+                        if (action_sel > 0) action_sel--;
+                        else m_focus = 1;
+                    }
+                    if (take_d() && action_sel + 1 < nrows) action_sel++;
+                    if (take_e()) {
+                        if (action_sel == 0) out.action = WmcAction::Play;
+                        else if (action_sel == options_idx) strip = HubMode::Settings;
+                        else if (bonus > 0) { extras_open = true; extras_sel = 0; }
+                    }
+                }
+            }
+        } else if (!sel) {
+            dl->AddText(m_font_body, 16.0f, ImVec2(panel_x, ap_y),
+                        with_alpha(kTextDim, 0.8f),
+                        "Open an ISO from Browse System to populate your library.");
+        }
+    } else if (strip == HubMode::Browse) {
+        const float bh = std::min(avail, 8 * 34.0f + 16.0f);
+        if (bh > 80.0f) {
+            draw_browse_panel(dl, panel_x, panel_y, panel_w, browse_path, browse,
+                              browse_sel, m_browse_scroll);
+            if (m_focus == 2 && take_u()) m_focus = 1;
+        }
+    } else {  // Settings
+        const float sh = std::min(avail, 3 * 62.0f + 10.0f);
+        if (sh > 80.0f) {
+            if (m_focus == 2) {
+                if (take_u()) { if (setting_sel > 0) setting_sel--; else m_focus = 1; }
+                if (take_d() && setting_sel < 2) setting_sel++;
+                const bool sl = take_l();
+                const bool sr = take_r();
+                if (sl || sr) {
+                    if (setting_sel == 0) {
+                        out.action = WmcAction::ToggleFullscreen;
+                    } else if (setting_sel == 1) {
+                        out.action = WmcAction::VolumeChanged;
+                        out.volume = std::clamp(volume + (sr ? 0.05f : -0.05f), 0.0f, 1.0f);
+                    } else {
+                        out.action = WmcAction::MuteToggled;
+                    }
+                }
+                if (take_e()) {
+                    if (setting_sel == 0) out.action = WmcAction::ToggleFullscreen;
+                    else if (setting_sel == 2) out.action = WmcAction::MuteToggled;
+                }
+            }
+            draw_settings_panel(dl, panel_x, panel_y, panel_w, setting_sel,
+                                fullscreen, volume, muted);
+        }
+    }
+
+    dl->PopClipRect();
+
+    // --- Footer hints (drawn last; nothing may overlap it) ---
+    std::string hint;
+    if (m_focus == 0)
+        hint = std::string("LEFT / RIGHT  switch strip     DOWN  enter strip     ")
+             + "F11  fullscreen     ESC / Q  quit";
+    else if (m_focus == 1)
+        hint = std::string("LEFT / RIGHT  move     UP  strips     DOWN  actions     ")
+             + "ENTER  open     F11  fullscreen     ESC / Q  quit";
+    else
+        hint = std::string("UP / DOWN  select     ENTER / LEFT / RIGHT  activate     ")
+             + "F11  fullscreen     ESC / Q  quit";
+    draw_footer(dl, w, h, hint);
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, true)) {
+        if (extras_open) extras_open = false;
+        else if (m_focus > 0) m_focus = 0;
+        else if (strip != HubMode::Recent) strip = HubMode::Recent;
+        else out.action = WmcAction::Quit;
+    }
 
     ImGui::End();
     return out;
 }
 
 void WmcUi::draw_osd(ImDrawList* dl, float w, float h, float alpha,
-                     bool paused, double elapsed, double total, WmcInput& out) {
+                     bool paused, double elapsed, double total,
+                     float volume, bool muted, bool fullscreen, WmcInput& out) {
     if (alpha <= 0.001f) return;
 
     const float bar_h = 92.0f;
-    const ImVec2 b0(w * 0.08f, h - bar_h - 26.0f);
-    const ImVec2 b1(w * 0.92f, h - 26.0f);
+    const ImVec2 b0(w * 0.06f, h - bar_h - 26.0f);
+    const ImVec2 b1(w * 0.94f, h - 26.0f);
     dl->AddRectFilled(b0, b1, with_alpha(IM_COL32(8, 20, 46, 235), alpha * 0.94f), 12.0f);
     dl->AddRect(b0, b1, with_alpha(kGlassHi, alpha * 0.35f), 12.0f, 0, 1.5f);
 
@@ -400,7 +767,7 @@ void WmcUi::draw_osd(ImDrawList* dl, float w, float h, float alpha,
     }
 
     // Seek bar.
-    const float sx0 = b0.x + 96.0f, sx1 = b1.x - 210.0f, sy = b0.y + 45.0f;
+    const float sx0 = b0.x + 96.0f, sx1 = b1.x - 300.0f, sy = b0.y + 45.0f;
     dl->AddRectFilled(ImVec2(sx0, sy), ImVec2(sx1, sy + 6),
                       with_alpha(kTextDim, alpha * 0.4f), 3.0f);
     const float frac = (total > 0) ? static_cast<float>(elapsed / total) : 0.0f;
@@ -419,17 +786,35 @@ void WmcUi::draw_osd(ImDrawList* dl, float w, float h, float alpha,
     format_time(elapsed, te, sizeof(te));
     format_time(total, tt, sizeof(tt));
     std::snprintf(line, sizeof(line), "%s / %s", te, tt);
-    dl->AddText(m_font_body, 17.0f, ImVec2(sx1 + 22, sy - 8), with_alpha(kTextPrimary, alpha), line);
+    dl->AddText(m_font_body, 17.0f, ImVec2(sx1 + 18, sy - 8), with_alpha(kTextPrimary, alpha), line);
+
+    // Volume readout.
+    char vol[24];
+    std::snprintf(vol, sizeof(vol), "%s %d%%", muted ? "MUTE" : "VOL",
+                  static_cast<int>(volume * 100.0f + 0.5f));
+    dl->AddText(m_font_body, 15.0f, ImVec2(sx1 + 18, sy + 18), with_alpha(kTextDim, alpha), vol);
+
+    // Fullscreen button.
+    const ImVec2 fb(b1.x - 232, b0.y + 24);
+    dl->AddRectFilled(fb, ImVec2(fb.x + 104, fb.y + 44),
+                      with_alpha(IM_COL32(30, 70, 130, 230), alpha), 8.0f);
+    dl->AddRect(fb, ImVec2(fb.x + 104, fb.y + 44), with_alpha(kGlassHi, alpha * 0.5f), 8.0f);
+    dl->AddText(m_font_body, 15.0f, ImVec2(fb.x + 12, fb.y + 14),
+                with_alpha(kTextPrimary, alpha), fullscreen ? "Windowed" : "Fullscr.");
+    if (ImGui::IsMouseClicked(0) &&
+        ImGui::IsMouseHoveringRect(fb, ImVec2(fb.x + 104, fb.y + 44))) {
+        out.action = WmcAction::ToggleFullscreen;
+    }
 
     // Back to Hub button.
-    const ImVec2 hb(b1.x - 156, b0.y + 24);
-    dl->AddRectFilled(hb, ImVec2(hb.x + 132, hb.y + 44),
+    const ImVec2 hb(b1.x - 120, b0.y + 24);
+    dl->AddRectFilled(hb, ImVec2(hb.x + 96, hb.y + 44),
                       with_alpha(IM_COL32(30, 70, 130, 230), alpha), 8.0f);
-    dl->AddRect(hb, ImVec2(hb.x + 132, hb.y + 44), with_alpha(kGlassHi, alpha * 0.5f), 8.0f);
-    dl->AddText(m_font_body, 16.0f, ImVec2(hb.x + 16, hb.y + 13),
-                with_alpha(kTextPrimary, alpha), "Back to Hub");
+    dl->AddRect(hb, ImVec2(hb.x + 96, hb.y + 44), with_alpha(kGlassHi, alpha * 0.5f), 8.0f);
+    dl->AddText(m_font_body, 15.0f, ImVec2(hb.x + 12, hb.y + 14),
+                with_alpha(kTextPrimary, alpha), "Hub");
     if (ImGui::IsMouseClicked(0) &&
-        ImGui::IsMouseHoveringRect(hb, ImVec2(hb.x + 132, hb.y + 44))) {
+        ImGui::IsMouseHoveringRect(hb, ImVec2(hb.x + 96, hb.y + 44))) {
         out.action = WmcAction::BackToHub;
     }
 }
@@ -437,7 +822,8 @@ void WmcUi::draw_osd(ImDrawList* dl, float w, float h, float alpha,
 WmcInput WmcUi::render_player(SDL_Texture* video_tex, int video_w, int video_h,
                               const DiscItem& disc, const std::string& stream_name,
                               bool paused, double elapsed, double total,
-                              bool& osd_visible, float t) {
+                              bool& osd_visible, float volume, bool muted,
+                              bool fullscreen, float t) {
     WmcInput out;
     if (!m_imgui_ready) return out;
 
@@ -483,9 +869,9 @@ WmcInput WmcUi::render_player(SDL_Texture* video_tex, int video_w, int video_h,
 
     dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, 52), IM_COL32(4, 12, 30, 150));
     dl->AddText(m_font_body, 18.0f, ImVec2(28, 15), with_alpha(kTextPrimary, 0.9f),
-                (disc.title + "   \xE2\x80\xA2   " + stream_name).c_str());
+                (disc.title + "   " + kBullet + "   " + stream_name).c_str());
 
-    draw_osd(dl, w, h, m_osd_alpha, paused, elapsed, total, out);
+    draw_osd(dl, w, h, m_osd_alpha, paused, elapsed, total, volume, muted, fullscreen, out);
 
     ImGui::End();
     return out;
