@@ -27,7 +27,17 @@ public:
 
     // Upload a decoded frame into the streaming video texture (no present).
     void update_video_texture(AVFrame* frame);
+    // Upload a synthetic planar YUV420P image (Y then U then V), for demos.
+    void update_demo_texture(const uint8_t* yuv, int width, int height);
     void queue_audio(const uint8_t* data, uint32_t len);
+
+    // Pause/resume the SDL audio device so queued audio holds its place in the
+    // buffer instead of draining while video is paused.
+    void pause_audio(bool paused);
+    // Drop everything still queued (called on seek/stop so no stale audio plays).
+    void clear_audio_queue();
+    // Bytes still waiting in the SDL queue (0 when the device is unavailable).
+    uint32_t queued_audio_bytes() const;
 
     // Window display mode. toggle_fullscreen() flips between a windowed frame
     // and SDL_WINDOW_FULLSCREEN_DESKTOP and returns the new fullscreen state.

@@ -46,6 +46,15 @@ public:
     // Seek relative in seconds (e.g., +5.0 or -5.0)
     bool seek_relative(double seconds);
 
+    // Seek to an absolute position in seconds, clamping to [0, duration].
+    // Flushes codec buffers and re-anchors the PSMF audio demuxer so no stale
+    // audio/video survives the jump.
+    bool seek_absolute(double seconds);
+
+    // Current playback clock in seconds, taken from the last decoded video
+    // frame's PTS (falls back to the frame count / fps when PTS is missing).
+    double current_time() const { return m_clock; }
+
     bool has_video() const { return m_video.stream_index != -1; }
     bool has_audio() const { return m_audio.stream_index != -1 || m_psmf_audio; }
     double get_fps() const { return m_fps; }
@@ -84,6 +93,9 @@ private:
     void process_psmf_audio(AVFrame* audio_frame, std::vector<uint8_t>& out_pcm, bool flush);
     bool resample_to_s16(AVFrame* audio_frame, std::vector<uint8_t>& out_pcm);
     void reset_psmf_audio(uint64_t scan_offset);
+    // Find the MPEG-PS pack/system-header offset nearest to a byte target so a
+    // seek can re-anchor the hand demuxer on a real packet boundary.
+    uint64_t psmf_find_scan_offset(uint64_t target);
 
     // Decode the next video frame from the FFmpeg demuxer, discarding packets
     // that belong to no tracked stream. Used by the PSMF interleave path.
@@ -118,6 +130,8 @@ private:
     AVPacket*        m_demux_pkt   = nullptr;
     double           m_fps         = 29.97;
     double           m_duration    = 0.0;   // seconds (0 = unknown)
+    double           m_clock       = 0.0;   // last decoded video PTS (seconds)
+    bool             m_resync_video = false; // drop to next keyframe after a seek
 
     static void save_ppm(AVFrame* frame, int width, int height, const std::string& filename);
 };

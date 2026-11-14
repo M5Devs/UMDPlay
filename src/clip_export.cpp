@@ -82,7 +82,7 @@ bool export_clip(const std::string& iso_path,
     }
     if (start_seconds > 0.0) {
         std::cout << "[*] clip_export: seeking to " << start_seconds << "s\n";
-        decoder.seek_relative(start_seconds);
+        decoder.seek_absolute(start_seconds);
     }
 
     // Demux to raw intermediate files. ffmpeg reads both inputs interleaved, so

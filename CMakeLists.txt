@@ -105,6 +105,15 @@ add_test(NAME test_recent COMMAND test_recent)
 set_tests_properties(test_recent PROPERTIES
     ENVIRONMENT "UMDPLAY_CONFIG_DIR=${CMAKE_BINARY_DIR}/test_recent_cfg")
 
+add_executable(test_playback tests/test_playback.cpp)
+target_link_libraries(test_playback PRIVATE umdplay_core)
+target_compile_options(test_playback PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME test_playback COMMAND test_playback)
+# Decodes a real stream when an ISO is reachable; state checks otherwise.
+set_tests_properties(test_playback PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    ENVIRONMENT "UMD_ISO=${PROJECT_SOURCE_DIR}/test_umd.iso")
+
 # The audio decoder test decodes a real stream when an ISO is reachable
 # (UMD_ISO env var or ./test_umd.iso) and degrades to state checks otherwise.
 set_tests_properties(test_audio_decoder PROPERTIES

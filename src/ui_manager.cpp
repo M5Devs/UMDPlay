@@ -99,6 +99,17 @@ void UiManager::update_video_texture(AVFrame* frame) {
     }
 }
 
+void UiManager::update_demo_texture(const uint8_t* yuv, int width, int height) {
+    if (!m_renderer || !yuv || width <= 0 || height <= 0) return;
+    update_texture_size(width, height);
+    if (!m_texture) return;
+    const int cw = width / 2, ch = height / 2;
+    SDL_UpdateYUVTexture(m_texture, nullptr,
+                         yuv, width,
+                         yuv + static_cast<size_t>(width) * height, cw,
+                         yuv + static_cast<size_t>(width) * height + cw * ch, cw);
+}
+
 void UiManager::render_video_frame(AVFrame* frame) {
     if (!m_renderer || !frame) return;
     update_video_texture(frame);
@@ -149,6 +160,21 @@ void UiManager::queue_audio(const uint8_t* data, uint32_t len) {
         dst[i] = static_cast<int16_t>(src[i] * m_volume);
     }
     SDL_QueueAudio(m_audio_dev, m_audio_scratch.data(), len);
+}
+
+void UiManager::pause_audio(bool paused) {
+    if (m_audio_dev == 0) return;
+    SDL_PauseAudioDevice(m_audio_dev, paused ? 1 : 0);
+}
+
+void UiManager::clear_audio_queue() {
+    if (m_audio_dev == 0) return;
+    SDL_ClearQueuedAudio(m_audio_dev);
+}
+
+uint32_t UiManager::queued_audio_bytes() const {
+    if (m_audio_dev == 0) return 0;
+    return SDL_GetQueuedAudioSize(m_audio_dev);
 }
 
 UserAction UiManager::handle_events() {

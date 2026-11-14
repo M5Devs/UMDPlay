@@ -46,6 +46,7 @@ UMD Video discs use a specific filesystem structure rooted in the `UMD_VIDEO/` d
 - [x] **Phase 1 — ISO & UDF Parser**: navigate `UMD_VIDEO/STREAM/`, dynamically resolve LBAs and file sizes from sector 28.
 - [x] **Phase 2 — Streaming & Decoding**: in-memory streaming via custom `AVIOContext`, H.264 AVC video decoding, and Sony PSMF ATRAC3+ audio frame reverse-engineering.
 - [x] **Phase 3 — Standalone Player + WMC UI**: synced real-time A/V playback with a Windows Media Center-inspired 10-foot UI (Recent / Browse / Options strips, disc hub, cover art, transport OSD) and a headless clip-export mode.
+- [x] **Phase 3.5 — Full Playback Transport**: pause/resume (video + SDL audio), ±10 s / ±30 s and scrub-bar seeking with keyframe-accurate resync, stop-to-Hub, real-time volume/mute, and an auto-hiding glossy WMC transport OSD with `HH:MM:SS` timestamps.
 - [ ] **Phase 4 — Menu Research**: reverse-engineer interactive menus via `.RCO` / `.VBO` overlays.
 - [ ] **Phase 5 — PPSSPP Integration**: expose a clean C-style API for native upstream integration.
 
@@ -112,6 +113,32 @@ Q              quit
 
 Cover art is decoded straight from the disc's PARAM.SFO `ICON0.PNG`; Japanese
 titles render via Noto Sans CJK when installed.
+
+### Player transport
+
+Watching a UMD behaves like a polished native media player. The glossy transport
+bar fades in on any input and auto-hides after ~3 s of inactivity — but never
+while paused or while the pointer is over it.
+
+```text
+SPACE                 play / pause (video clock + SDL audio pause together)
+LEFT / RIGHT          seek -10 s / +10 s
+SHIFT+LEFT/RIGHT      seek -30 s / +30 s
+drag the timeline     scrub to any position (releases into a seek)
+UP / DOWN             volume -5% / +5%
+M                     mute / unmute
+F11 / Alt+Enter       toggle fullscreen
+ESC / BACKSPACE       stop and return to the Hub
+```
+
+Seeking flushes the FFmpeg codec buffers, re-anchors the hand-demuxed PSMF
+ATRAC3+ reader on a real MPEG-PS pack boundary, resyncs video to the next
+keyframe (so a mid-GOP jump never shows corrupt macroblocks), and drops any
+stale audio still queued in SDL — no drift, no stutter on resume. Timestamps are
+shown as `HH:MM:SS / HH:MM:SS` along the timeline, with the disc title from
+`PARAM.SFO` at the top-left.
+
+![Player transport OSD](player_osd_preview.png)
 
 ---
 
