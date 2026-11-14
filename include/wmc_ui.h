@@ -18,6 +18,12 @@ struct StreamItem {
     bool        is_main    = false;
 };
 
+// One chapter / marker inside a disc's main feature (from PLAYLIST.UMD).
+struct ChapterItem {
+    std::string label;         // "Mark4515" / "Chapter 1" (never empty)
+    double      seconds = 0.0; // absolute timestamp within the stream
+};
+
 // A disc (one ISO) shown as a carousel tile.
 struct DiscItem {
     std::string              iso_path;
@@ -25,6 +31,8 @@ struct DiscItem {
     std::string              disc_id;    // PARAM.SFO DISC_ID
     std::string              category;   // PARAM.SFO CATEGORY (UV / UA / UG)
     std::vector<StreamItem>  streams;
+    std::vector<ChapterItem> chapters;   // PLAYLIST.UMD markers of the main track
+    std::string              playlist_title;  // PLAYLIST.UMD header title
 
     SDL_Texture*             icon = nullptr;   // ICON0.PNG
     SDL_Texture*             pic1 = nullptr;   // PIC1.PNG (optional)
@@ -63,6 +71,8 @@ struct NowPlaying {
     std::string stream;
     double      elapsed = 0.0;
     double      total   = 0.0;
+    int         chapter = -1;   // current chapter index (-1 = none)
+    int         chapters = 0;   // total chapters on the disc
 };
 
 // Static media facts for the in-player Settings "Media Info" readout.
@@ -77,6 +87,9 @@ struct PlayerMediaInfo {
     int         sample_rate = 0;
     bool        deinterlace = true;
     bool        interlaced = false;
+    int         chapter = -1;      // current chapter index (-1 = none)
+    int         chapter_count = 0; // total chapters
+    std::string chapter_label;     // current chapter label
 };
 
 // Navigation intents emitted by the UI, consumed by main().
@@ -96,6 +109,9 @@ enum class WmcAction {
     SeekRelative,       // seek by `seek_delta` seconds (negative = back)
     Stop,               // stop playback, return to the Hub
     SeekTo,             // seek bar drag (absolute seconds in `seek_seconds`)
+    PrevChapter,        // jump to the previous PLAYLIST.UMD marker
+    NextChapter,        // jump to the next PLAYLIST.UMD marker
+    PlayChapter,        // jump to chapter `chapter_index` (hub chapter list)
     ToggleFullscreen,
     ToggleDeinterlace,
     SetAspect,          // new zoom mode in `aspect_mode`
@@ -108,6 +124,7 @@ struct WmcInput {
     double    seek_seconds = 0.0;
     double    seek_delta = 0.0;
     int       stream_index = -1;
+    int       chapter_index = -1;
     float     volume = 1.0f;
     std::string iso_path;
     aspect::Mode aspect_mode = aspect::Mode::Auto;
@@ -144,6 +161,7 @@ public:
                         const std::string& browse_path,
                         HubMode& category,
                         int& action_sel, bool& extras_open, int& extras_sel,
+                        bool& chapters_open, int& chapter_sel,
                         int& setting_sel,
                         const NowPlaying& now_playing, bool loading,
                         bool fullscreen, float volume, bool muted, float t);
@@ -179,6 +197,11 @@ private:
     void draw_action_panel(ImDrawList* dl, float x, float y, float w,
                            const DiscItem& disc, int action_sel, bool extras_open,
                            int extras_sel, int bonus_count);
+    // Chapters sub-page of the action panel (markers from PLAYLIST.UMD).
+    // Drawn as a centred modal over the tile area so a long chapter list fits.
+    void draw_chapters_panel(ImDrawList* dl, float w, float h,
+                             const std::vector<ChapterItem>& chapters,
+                             int chapter_sel);
     void draw_browse_panel(ImDrawList* dl, float x, float y, float w,
                            const std::string& path,
                            const std::vector<BrowseEntry>& entries,
@@ -197,7 +220,8 @@ private:
     bool draw_osd(ImDrawList* dl, float w, float h, float alpha,
                   bool paused, double elapsed, double total,
                   float volume, bool muted, bool fullscreen,
-                  bool settings_open, bool& gear_clicked, WmcInput& out);
+                  bool settings_open, int chapter, int chapter_count,
+                  bool& gear_clicked, WmcInput& out);
     // Translucent Settings overlay (does not stop playback).
     void draw_settings_overlay(ImDrawList* dl, float w, float h, float alpha,
                                int setting_sel, aspect::Mode aspect_mode,

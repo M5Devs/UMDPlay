@@ -30,6 +30,22 @@ struct UmdFile {
     std::vector<uint8_t> data;        // loaded on demand
 };
 
+// Which UMD content root the disc uses. UMD Video discs carry /UMD_VIDEO/,
+// UMD Music (audio) discs carry /UMD_AUDIO/ instead.
+enum class UmdRoot {
+    None,
+    Video,   // /UMD_VIDEO/
+    Audio,   // /UMD_AUDIO/
+};
+
+// A discovered non-stream asset file (PLAYLIST.UMD / CLIPINF/*.CLP / RESOURCE/*.RCO).
+struct UmdAsset {
+    std::string name;        // file name only, e.g. "PLAYLIST.UMD" / "00001.CLP" / "JA100000.RCO"
+    std::string dir;         // "UMD_VIDEO", "UMD_VIDEO/CLIPINF", "UMD_VIDEO/RESOURCE", ...
+    uint32_t    lba = 0;
+    uint32_t    size_bytes = 0;
+};
+
 class IsoReader {
 public:
     explicit IsoReader(const std::string& iso_path);
@@ -71,11 +87,33 @@ public:
     std::vector<uint8_t> read_metadata(const std::string& filename) const;
     bool has_metadata(const std::string& filename) const;
 
+    // --- Full UMD disc structure (Phase 4: menus / chapters) ---
+
+    // Which content root this disc uses (UMD_VIDEO or UMD_AUDIO fallback).
+    UmdRoot root() const { return m_root; }
+    // "UMD_VIDEO" or "UMD_AUDIO" (the active root), or "" when none found.
+    const std::string& root_name() const { return m_root_name; }
+
+    // Asset files discovered under the active root: PLAYLIST.UMD, CLIPINF/*.CLP
+    // and RESOURCE/*.RCO. Sorted by (dir, name).
+    const std::vector<UmdAsset>& assets() const { return m_assets; }
+    // First asset whose file name matches (case-insensitive); nullptr if none.
+    const UmdAsset* find_asset(const std::string& name) const;
+    // All assets in a given sub-directory ("" = root, "CLIPINF", "RESOURCE").
+    std::vector<UmdAsset> assets_in(const std::string& dir) const;
+
+    // Raw bytes of any discovered asset ("" when not found / unreadable).
+    std::vector<uint8_t> read_asset(const UmdAsset& asset) const;
+    std::vector<uint8_t> read_asset(const std::string& name) const;
+
 private:
     std::string           m_iso_path;
     std::vector<MpsEntry> m_entries;
     std::vector<UmdFile>  m_metadata;   // files found in UMD_VIDEO/ root
     ParamSfo              m_param;
+    UmdRoot               m_root = UmdRoot::None;
+    std::string           m_root_name;  // "UMD_VIDEO" / "UMD_AUDIO"
+    std::vector<UmdAsset> m_assets;     // PLAYLIST.UMD / CLP / RCO
 
     // Read one 2048-byte sector from the ISO
     bool read_sector(uint32_t lba, uint8_t* buf) const;
@@ -85,5 +123,24 @@ private:
 
     // Parse UMD_VIDEO/ root (sector 24) for PARAM.SFO / ICON0.PNG / PIC1.PNG etc.
     void parse_metadata_dir();
+
+    // --- ISO 9660 directory traversal (used for full structure discovery) ---
+
+    // One ISO 9660 directory record.
+    struct IsoDirRecord {
+        std::string name;
+        uint32_t    lba = 0;
+        uint32_t    size_bytes = 0;
+        bool        is_dir = false;
+    };
+
+    // List the entries of the ISO 9660 directory at `lba` (size in bytes).
+    std::vector<IsoDirRecord> list_iso_dir(uint32_t lba, uint32_t size) const;
+    // Read a whole file (clamped to a sane cap) given its LBA and size.
+    std::vector<uint8_t> read_file(uint32_t lba, uint32_t size_bytes) const;
+
+    // Locate the content root (UMD_VIDEO, else UMD_AUDIO) and discover the
+    // PLAYLIST.UMD / CLIPINF/*.CLP / RESOURCE/*.RCO assets beneath it.
+    void discover_assets();
 };
 

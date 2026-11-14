@@ -95,12 +95,77 @@ Files inside `UMD_VIDEO/CLIPINF/` (e.g. `00001.CLP`) use the **`CLPI0088`** cont
 
 ---
 
+## Playlist & Chapters (`PLAYLIST.UMD`)
+
+`UMD_VIDEO/PLAYLIST.UMD` is the disc's top-level navigation table: the title
+list, the clip each title plays, and the chapter markers the movie player
+exposes. The whole file is **big-endian** (unlike the little-endian `.RCO`).
+
+Header (`0x00`–`0x135`):
+
+| Offset | Size | Field |
+|---|---|---|
+| `0x00` | 8 | Magic `UMDV0088` (`UMDA0088` on UMD Audio); the 4 ASCII digits are the version |
+| `0x08` | 4 | Offset to the file-data table (`0x130` on the sample disc) |
+| `0x2C` | 4 | Number of tracks (also re-stated at `0x134`) |
+| `0x30` | 1 | Title length, then the title bytes (e.g. `UMDV-SAMPLE`) |
+
+File-data table at `0x130`: `+0x00` = 4-byte size from `0x134` to EOF;
+`+0x04` = 2-byte track count; then the track records.
+
+Each **track record** (`0x338` bytes, plus `0x28` bytes per marker):
+
+| Offset | Size | Field |
+|---|---|---|
+| `0x00` | 4 | Entry length (bytes following this field) |
+| `0x36` | 1+N | Track name (e.g. `3_Honpen`) |
+| `0x312` | 2 | Flags |
+| `0x31E` | 5 | Linked clip id (e.g. `00001` → `STREAM/00001.MPS`) |
+| `0x328` | 4 | IN timestamp (90 kHz units) |
+| `0x32E` | 4 | OUT timestamp (90 kHz units) |
+| `0x336` | 2 | Marker count |
+
+Each **marker record** (`0x28` bytes): `+0x00` type byte (`0x05` = chapter),
+`+0x01` label length, `+0x06` timestamp (90 kHz), `+0x10` label (e.g.
+`Mark4515`). The name is a label, not a number — the numeric suffix is only a
+convention; the authoritative chapter time is the 90 kHz timestamp
+(`seconds = ts / 90000`).
+
+On the reference disc the main feature is track `3_Honpen` (clip `00001`) with
+**45 markers**; the parser round-trips its track table to EOF byte-exactly.
+
+`include/playlist_parser.h` / `src/playlist_parser.cpp` expose `parse_playlist()`
+(pure, bounds-checked, never throws), `Playlist::main_track()`,
+`Playlist::chapters()`, plus the pure navigation helpers `chapter_at()` and
+`chapter_step()` used by both the CLI and the UI.
+
+---
+
+## Menu Resources (`RESOURCE/*.RCO`)
+
+Files inside `UMD_VIDEO/RESOURCE/` (e.g. `JA100000.RCO`) are the interactive
+menu resources. The container is **little-endian** with a leading NUL byte:
+
+| Offset | Size | Field |
+|---|---|---|
+| `0x00` | 4 | Magic `\0PRF` |
+| `0x04` | 4 | Version (`0x80`) |
+| `0x10` | 8 | TOC entry 0: 4-byte offset + 4-byte size (LE); `0xFFFFFFFF` = absent |
+| … | 8 | Further TOC entries |
+
+Embedded resources are located by the TOC. The reference file holds **81 PNG
+images** (buttons/labels for the menu) and a **`VSMX`** bytecode block (the
+menu's script VM). `include/rco_parser.h` / `src/rco_parser.cpp` probe the
+header/TOC, enumerate the PNGs (with dimensions), and report the `VSMX` offset.
+
+---
+
 ## Phase Roadmap
 
 | Phase | Status | Description |
 |---|---|---|
 | 1 | ✅ Done | UDF ISO parser — locate & read .MPS stream sectors |
 | 2 | ✅ Done | FFmpeg custom AVIO streaming + H.264 video decoding + ATRAC3+ PSMF audio reverse-engineering |
-| 3 | 🔄 Next | Standalone SDL2 + ImGui GUI player with synced A/V playback |
-| 4 | ⏳ Planned | Interactive menu system (.RCO / .VBO reverse-engineering) |
+| 3 | ✅ Done | Standalone SDL2 + ImGui GUI player with synced A/V playback |
+| 4 | 🔄 In progress | Interactive menus & chapters — PLAYLIST.UMD / CLPI0088 / `.RCO` parsing (done), real chapter navigation (done), `.VBO` / VSMX menu VM (planned) |
 | 5 | ⏳ Planned | PPSSPP integration API |

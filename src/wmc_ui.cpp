@@ -524,6 +524,8 @@ void WmcUi::draw_action_panel(ImDrawList* dl, float x, float y, float w,
     struct Row { const char* label; std::string detail; bool enabled; };
     std::vector<Row> rows;
     rows.push_back({"Play", "Main Feature " + main_size, !disc.streams.empty()});
+    if (!disc.chapters.empty())
+        rows.push_back({"Chapters", std::to_string(disc.chapters.size()) + " chapter(s)", true});
     if (bonus_count > 0)
         rows.push_back({"Extras", std::to_string(bonus_count) + " bonus clip(s)", true});
     rows.push_back({"Options", "Display & audio", true});
@@ -549,6 +551,66 @@ void WmcUi::draw_action_panel(ImDrawList* dl, float x, float y, float w,
                     ImVec2(r1.x - 16 - ds.x * sc, ry + 15), with_alpha(kTextDim, 0.9f),
                     rows[i].detail.c_str());
         ry += row_h + gap;
+    }
+}
+
+void WmcUi::draw_chapters_panel(ImDrawList* dl, float w, float h,
+                                const std::vector<ChapterItem>& chapters,
+                                int chapter_sel) {
+    const float row_h = 34.0f;
+    const int visible = 10;
+    const float pw = std::min(w * 0.5f, 560.0f);
+    const float ph = row_h * visible + 56.0f;
+    const ImVec2 p0((w - pw) * 0.5f, (h - ph) * 0.5f - 10.0f);
+    const ImVec2 p1(p0.x + pw, p0.y + ph);
+    dl->AddRectFilled(p0, p1, IM_COL32(8, 20, 46, 236), 12.0f);
+    dl->AddRect(p0, p1, with_alpha(kAccent, 0.55f), 12.0f, 0, 1.8f);
+
+    dl->AddText(m_font_body, 18.0f, ImVec2(p0.x + 20, p0.y + 14),
+                with_alpha(kTextPrimary, 0.96f), "CHAPTERS");
+    char cnt[32];
+    std::snprintf(cnt, sizeof(cnt), "%d marker(s)", static_cast<int>(chapters.size()));
+    const ImVec2 cs = m_font_body->CalcTextSizeA(15.0f, FLT_MAX, 0.0f, cnt);
+    dl->AddText(m_font_body, 15.0f, ImVec2(p1.x - 20 - cs.x, p0.y + 18),
+                with_alpha(kTextDim, 0.95f), cnt);
+    dl->AddLine(ImVec2(p0.x + 20, p0.y + 44), ImVec2(p1.x - 20, p0.y + 44),
+                with_alpha(kGlassHi, 0.2f), 1.0f);
+
+    const int n = static_cast<int>(chapters.size());
+    int first = 0;
+    if (chapter_sel >= visible) first = chapter_sel - visible + 1;
+    if (first > n - visible) first = std::max(0, n - visible);
+    const int last = std::min(n, first + visible);
+
+    float ry = p0.y + 50.0f;
+    for (int i = first; i < last; ++i) {
+        const bool active = (i == chapter_sel);
+        const ImVec2 a0(p0.x + 12, ry), a1(p1.x - 12, ry + row_h - 4.0f);
+        if (active) {
+            dl->AddRectFilled(a0, a1, with_alpha(kCobaltGlow, 0.36f), 8.0f);
+            dl->AddRect(a0, a1, with_alpha(kAccent, 0.9f), 8.0f, 0, 1.8f);
+        }
+        char idx[16];
+        std::snprintf(idx, sizeof(idx), "%02d", i + 1);
+        dl->AddText(m_font_body, 15.0f, ImVec2(a0.x + 12, ry + 6),
+                    with_alpha(active ? kAccent : kTextDim, 0.95f), idx);
+        std::string label = chapters[i].label;
+        if (label.size() > 30) label = label.substr(0, 29) + "\u2026";
+        dl->AddText(m_font_body, 17.0f, ImVec2(a0.x + 52, ry + 4),
+                    active ? kTextPrimary : with_alpha(kTextPrimary, 0.82f), label.c_str());
+        char ts[16];
+        format_time(chapters[i].seconds, ts, sizeof(ts));
+        const ImVec2 tsz = m_font_body->CalcTextSizeA(15.0f, FLT_MAX, 0.0f, ts);
+        dl->AddText(m_font_body, 15.0f, ImVec2(a1.x - 12 - tsz.x, ry + 6),
+                    with_alpha(kTextDim, 0.95f), ts);
+        ry += row_h;
+    }
+    // Scroll hint when the list is longer than the window.
+    if (n > visible) {
+        char sc[48];
+        std::snprintf(sc, sizeof(sc), "%d-%d of %d", first + 1, last, n);
+        dl->AddText(m_font_body, 13.0f, ImVec2(p0.x + 20, p1.y - 20),
+                    with_alpha(kTextDim, 0.9f), sc);
     }
 }
 
@@ -755,6 +817,7 @@ WmcInput WmcUi::render_hub(SDL_Texture* video_tex, int video_w, int video_h,
                            const std::string& browse_path,
                            HubMode& category,
                            int& action_sel, bool& extras_open, int& extras_sel,
+                           bool& chapters_open, int& chapter_sel,
                            int& setting_sel,
                            const NowPlaying& now_playing, bool loading,
                            bool fullscreen, float volume, bool muted, float t) {
@@ -786,7 +849,7 @@ WmcInput WmcUi::render_hub(SDL_Texture* video_tex, int video_w, int video_h,
     };
 
     // Focus model: 0 = categories, 1 = tiles, 2 = panel rows.
-    if (category != m_last_strip) { m_focus = 1; extras_open = false; m_last_strip = category; }
+    if (category != m_last_strip) { m_focus = 1; extras_open = false; chapters_open = false; m_last_strip = category; }
     m_focus = std::clamp(m_focus, 0, 2);
 
     const DiscItem* sel = nullptr;
@@ -961,14 +1024,29 @@ WmcInput WmcUi::render_hub(SDL_Texture* video_tex, int video_w, int video_h,
                     kTextPrimary, title);
         int bonus = 0;
         if (sel) for (const auto& s : sel->streams) if (!s.is_main) ++bonus;
+        const int chapters = sel ? static_cast<int>(sel->chapters.size()) : 0;
         const float ap_y = panel_y + 34.0f;
         if (sel && (panel_top - ap_y) > 56.0f) {
-            const int nrows = 2 + (bonus > 0 ? 1 : 0);
+            // Row layout: Play, [Chapters], [Extras], Options.
+            const int chapters_idx = chapters > 0 ? 1 : -1;
+            const int extras_idx   = chapters > 0 ? 2 : 1;
+            const int options_idx  = (chapters > 0 ? 1 : 0) + (bonus > 0 ? 1 : 0) + 1;
+            const int nrows        = (chapters > 0 ? 1 : 0) + (bonus > 0 ? 1 : 0) + 2;
             action_sel = std::clamp(action_sel, 0, nrows - 1);
             draw_action_panel(dl, panel_x, ap_y, panel_w, *sel, action_sel,
                               extras_open, extras_sel, bonus);
             if (m_focus == 2) {
-                if (extras_open) {
+                if (chapters_open && chapters > 0) {
+                    chapter_sel = std::clamp(chapter_sel, 0, chapters - 1);
+                    if (take_u() && chapter_sel > 0) chapter_sel--;
+                    if (take_d() && chapter_sel + 1 < chapters) chapter_sel++;
+                    if (take_l() || take_r()) chapters_open = false;
+                    if (take_e()) {
+                        out.action = WmcAction::PlayChapter;
+                        out.chapter_index = chapter_sel;
+                    }
+                    if (ImGui::IsKeyPressed(ImGuiKey_Escape, true)) chapters_open = false;
+                } else if (extras_open && bonus > 0) {
                     if (take_u() && extras_sel > 0) extras_sel--;
                     if (take_d() && extras_sel + 1 < bonus) extras_sel++;
                     if (take_l() || take_r()) extras_open = false;
@@ -982,16 +1060,18 @@ WmcInput WmcUi::render_hub(SDL_Texture* video_tex, int video_w, int video_h,
                     }
                     if (ImGui::IsKeyPressed(ImGuiKey_Escape, true)) extras_open = false;
                 } else {
-                    const int options_idx = nrows - 1;
                     if (take_u()) { if (action_sel > 0) action_sel--; else m_focus = 1; }
                     if (take_d() && action_sel + 1 < nrows) action_sel++;
                     if (take_e()) {
                         if (action_sel == 0) out.action = WmcAction::Play;
                         else if (action_sel == options_idx) category = HubMode::Settings;
-                        else if (bonus > 0) { extras_open = true; extras_sel = 0; }
+                        else if (action_sel == chapters_idx) { chapters_open = true; chapter_sel = 0; }
+                        else if (action_sel == extras_idx) { extras_open = true; extras_sel = 0; }
                     }
                 }
             }
+            // Chapters sub-page is drawn as a centred modal after the panel
+            // clip rect is popped (see below), so a long list is not clipped.
         } else if (!sel) {
             dl->AddText(m_font_body, 16.0f, ImVec2(panel_x, ap_y),
                         with_alpha(kTextDim, 0.8f),
@@ -1029,6 +1109,12 @@ WmcInput WmcUi::render_hub(SDL_Texture* video_tex, int video_w, int video_h,
     }
     dl->PopClipRect();
 
+    // Chapters modal: centred over the tile area, above the panels.
+    if (chapters_open && category == HubMode::Recent && sel && !sel->chapters.empty()) {
+        chapter_sel = std::clamp(chapter_sel, 0, static_cast<int>(sel->chapters.size()) - 1);
+        draw_chapters_panel(dl, w, h, sel->chapters, chapter_sel);
+    }
+
     // --- Mini "Now Playing" PIP + glossy transport ---
     if (has_np) {
         draw_now_playing_pip(dl, w, h, now_playing, video_tex, video_w, video_h, t);
@@ -1055,7 +1141,8 @@ WmcInput WmcUi::render_hub(SDL_Texture* video_tex, int video_w, int video_h,
     draw_footer(dl, w, h, hint);
 
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, true)) {
-        if (extras_open) extras_open = false;
+        if (chapters_open) chapters_open = false;
+        else if (extras_open) extras_open = false;
         else if (m_focus > 0) m_focus = 0;
         else if (category != HubMode::Recent && category != HubMode::NowPlaying) category = HubMode::Recent;
         else out.action = WmcAction::Quit;
@@ -1198,7 +1285,8 @@ void WmcUi::draw_player_huds(ImDrawList* dl, float w, float h, float alpha) {
 bool WmcUi::draw_osd(ImDrawList* dl, float w, float h, float alpha,
                      bool paused, double elapsed, double total,
                      float volume, bool muted, bool fullscreen,
-                     bool settings_open, bool& gear_clicked, WmcInput& out) {
+                     bool settings_open, int chapter, int chapter_count,
+                     bool& gear_clicked, WmcInput& out) {
     gear_clicked = false;
     if (alpha <= 0.001f) return false;
 
@@ -1282,6 +1370,34 @@ bool WmcUi::draw_osd(ImDrawList* dl, float w, float h, float alpha,
     cx += r * 2.0f + 12.0f;
     if (circle_btn(cx, "+10", false)) { out.action = WmcAction::SeekRelative; out.seek_delta = 10.0; }
     cx += r * 2.0f + 12.0f;
+
+    // --- Chapter navigation (only when the disc exposes chapters) -----------
+    if (chapter_count > 0) {
+        // Draw a small "|<<" / ">>|" pair with the current chapter label above.
+        const ImVec2 c0(cx, by + 20.0f);
+        auto chap_btn = [&](float ccx, const char* glyph, bool enabled) -> bool {
+            const ImVec2 c(ccx, by + 20.0f);
+            const bool hov = enabled && ImGui::IsMouseHoveringRect(
+                ImVec2(c.x - r, c.y - r), ImVec2(c.x + r, c.y + r));
+            dl->AddCircleFilled(c, r, with_alpha(
+                !enabled ? IM_COL32(24, 40, 70, 200)
+                         : (hov ? kAccent : IM_COL32(30, 70, 130, 230)), alpha * 0.96f), 32);
+            dl->AddCircle(c, r, with_alpha(kGlassHi, alpha * 0.5f), 32, 1.5f);
+            const ImVec2 ts = m_font_body->CalcTextSizeA(14.0f, FLT_MAX, 0.0f, glyph);
+            dl->AddText(m_font_body, 14.0f, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f),
+                        with_alpha(enabled ? kTextPrimary : kTextDim, alpha), glyph);
+            return hov && ImGui::IsMouseClicked(0);
+        };
+        if (chap_btn(c0.x, "|<", chapter > 0)) out.action = WmcAction::PrevChapter;
+        cx += r * 2.0f + 12.0f;
+        if (chap_btn(cx, ">|", chapter + 1 < chapter_count)) out.action = WmcAction::NextChapter;
+        cx += r * 2.0f + 12.0f;
+        // Current chapter readout above the buttons.
+        char cl[48];
+        std::snprintf(cl, sizeof(cl), "CH %d/%d", chapter + 1, chapter_count);
+        dl->AddText(m_font_body, 13.0f, ImVec2(c0.x - 6.0f, by - 2.0f),
+                    with_alpha(kTextDim, alpha), cl);
+    }
 
     // --- Right group: gear, volume, mute, fullscreen ------------------------
     const float r2 = 22.0f;
@@ -1392,6 +1508,13 @@ void WmcUi::draw_settings_overlay(ImDrawList* dl, float w, float h, float alpha,
                   mi.psmf_audio ? "ATRAC3+ (PSMF)" : "FFmpeg", mi.sample_rate,
                   mi.stride);
     info(vb);
+    if (mi.chapter_count > 0) {
+        std::snprintf(vb, sizeof(vb), "Chapter: %d / %d  %s",
+                      mi.chapter + 1, mi.chapter_count,
+                      mi.chapter_label.empty() ? "" : mi.chapter_label.c_str());
+        info(vb);
+        info("Chapter nav: PgUp/PgDn or [ / ]");
+    }
 
     // Interaction: left/right and Enter change the focused setting.
     if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true) && setting_sel > 0) --setting_sel;
@@ -1490,6 +1613,19 @@ WmcInput WmcUi::render_player(SDL_Texture* video_tex, int video_w, int video_h,
     }
     if (ImGui::IsKeyPressed(ImGuiKey_M, true)) out.action = WmcAction::MuteToggled;
     if (ImGui::IsKeyPressed(ImGuiKey_F11, true)) out.action = WmcAction::ToggleFullscreen;
+    // Chapter navigation: PageUp/PageDown or [ / ] jump between markers.
+    if (mi.chapter_count > 0 && !settings_open) {
+        if (ImGui::IsKeyPressed(ImGuiKey_PageUp, true) ||
+            ImGui::IsKeyPressed(ImGuiKey_LeftBracket, true)) {
+            out.action = WmcAction::PrevChapter;
+            osd_visible = true; m_last_input_time = t;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_PageDown, true) ||
+            ImGui::IsKeyPressed(ImGuiKey_RightBracket, true)) {
+            out.action = WmcAction::NextChapter;
+            osd_visible = true; m_last_input_time = t;
+        }
+    }
     // O / Tab toggle the Settings overlay without stopping playback.
     if (ImGui::IsKeyPressed(ImGuiKey_O, true) || ImGui::IsKeyPressed(ImGuiKey_Tab, true)) {
         settings_open = !settings_open;
@@ -1535,14 +1671,22 @@ WmcInput WmcUi::render_player(SDL_Texture* video_tex, int video_w, int video_h,
     if (m_osd_alpha > 0.02f) {
         dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, 52),
                           IM_COL32(4, 12, 30, static_cast<int>(150 * m_osd_alpha)));
+        std::string title = disc.title + "   " + kBullet + "   " + stream_name;
+        if (mi.chapter_count > 0 && mi.chapter >= 0) {
+            char cb[64];
+            std::snprintf(cb, sizeof(cb), "   %s   CH %d/%d",
+                          kBullet, mi.chapter + 1, mi.chapter_count);
+            title += cb;
+            if (!mi.chapter_label.empty()) title += "  " + mi.chapter_label;
+        }
         dl->AddText(m_font_body, 18.0f, ImVec2(28, 15),
-                    with_alpha(kTextPrimary, 0.92f * m_osd_alpha),
-                    (disc.title + "   " + kBullet + "   " + stream_name).c_str());
+                    with_alpha(kTextPrimary, 0.92f * m_osd_alpha), title.c_str());
     }
 
     bool gear_clicked = false;
     const bool osd_hover = draw_osd(dl, w, h, m_osd_alpha, paused, elapsed, total,
                                     volume, muted, fullscreen, settings_open,
+                                    mi.chapter, mi.chapter_count,
                                     gear_clicked, out);
     if (gear_clicked) { settings_open = !settings_open; setting_sel = 0; osd_visible = true; m_last_input_time = t; }
 

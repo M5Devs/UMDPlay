@@ -1,5 +1,6 @@
 #include "iso_reader.h"
 #include <cstring>
+#include <cctype>
 #include <fstream>
 #include <iostream>
 #include <iomanip>
@@ -29,7 +30,145 @@ bool IsoReader::open() {
               << UMD_STREAM_DIR_LBA << ")\n";
 
     parse_metadata_dir();
-    return parse_udf_stream_dir();
+    const bool ok = parse_udf_stream_dir();
+    discover_assets();
+    return ok;
+}
+
+// --- ISO 9660 directory traversal ---------------------------------------
+// The UMD discs are dual ISO9660/UDF: the ISO9660 root directory is a plain
+// directory record tree we can walk to find every file (the hand-rolled UDF
+// STREAM/ parser above only knows a fixed LBA). This walker is what lets us
+// discover PLAYLIST.UMD, CLIPINF/*.CLP and RESOURCE/*.RCO wherever they live.
+
+std::vector<IsoReader::IsoDirRecord> IsoReader::list_iso_dir(uint32_t lba,
+                                                             uint32_t size) const {
+    std::vector<IsoDirRecord> out;
+    if (size == 0) return out;
+    // Clamp to a sane bound (a directory never legitimately exceeds 1 MiB here).
+    const uint32_t cap = std::min<uint32_t>(size, 1u << 20);
+    std::vector<uint8_t> data(cap);
+    std::ifstream f(m_iso_path, std::ios::binary);
+    if (!f) return out;
+    f.seekg(static_cast<std::streamoff>(lba) * UMD_SECTOR_SIZE);
+    f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(cap));
+    const size_t got = static_cast<size_t>(f.gcount());
+    data.resize(got);
+
+    size_t off = 0;
+    while (off + 33 <= data.size()) {
+        const uint8_t len = data[off];
+        if (len == 0) {
+            // Padding to the next logical sector boundary.
+            off = ((off / UMD_SECTOR_SIZE) + 1) * UMD_SECTOR_SIZE;
+            continue;
+        }
+        if (off + len > data.size() || len < 33) break;
+
+        const uint8_t* rec = data.data() + off;
+        IsoDirRecord r;
+        r.lba        = static_cast<uint32_t>(rec[2]) |
+                       (static_cast<uint32_t>(rec[3]) << 8) |
+                       (static_cast<uint32_t>(rec[4]) << 16) |
+                       (static_cast<uint32_t>(rec[5]) << 24);
+        r.size_bytes = static_cast<uint32_t>(rec[10]) |
+                       (static_cast<uint32_t>(rec[11]) << 8) |
+                       (static_cast<uint32_t>(rec[12]) << 16) |
+                       (static_cast<uint32_t>(rec[13]) << 24);
+        const uint8_t flags = rec[25];
+        const uint8_t name_len = rec[32];
+        if (33u + name_len > len) { off += len; continue; }
+        const char* name = reinterpret_cast<const char*>(rec + 33);
+
+        // Skip the "." and ".." self/parent entries (name 0x00 / 0x01).
+        if (name_len == 1 && (static_cast<uint8_t>(name[0]) == 0 ||
+                              static_cast<uint8_t>(name[0]) == 1)) {
+            off += len;
+            continue;
+        }
+        r.name.assign(name, name_len);
+        // Strip a trailing ";1" ISO9660 version suffix if present.
+        const size_t semi = r.name.find(';');
+        if (semi != std::string::npos) r.name.resize(semi);
+        r.is_dir = (flags & 0x02) != 0;
+        out.push_back(std::move(r));
+        off += len;
+    }
+    return out;
+}
+
+std::vector<uint8_t> IsoReader::read_file(uint32_t lba, uint32_t size_bytes) const {
+    if (size_bytes == 0) return {};
+    // Guard against a corrupt size field (cap at 64 MiB — PLAYLIST/CLP/RCO are
+    // all far smaller; the biggest .MPS is read through read_mps()).
+    const uint32_t cap = std::min<uint32_t>(size_bytes, 64u << 20);
+    std::ifstream f(m_iso_path, std::ios::binary);
+    if (!f) return {};
+    f.seekg(static_cast<std::streamoff>(lba) * UMD_SECTOR_SIZE);
+    std::vector<uint8_t> buf(cap);
+    f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(cap));
+    buf.resize(static_cast<size_t>(f.gcount()));
+    return buf;
+}
+
+// Discover the content root (UMD_VIDEO, else UMD_AUDIO) and the menu assets
+// under it. Uses the ISO9660 tree so the layout is found, not hard-coded.
+void IsoReader::discover_assets() {
+    // ISO9660 primary volume descriptor -> root directory record.
+    std::vector<uint8_t> pvd = read_file(16, UMD_SECTOR_SIZE);
+    if (pvd.size() < 190) return;
+    // Root directory record lives at offset 156 of the PVD.
+    const uint8_t* rde = pvd.data() + 156;
+    const uint32_t root_lba = static_cast<uint32_t>(rde[2]) |
+                              (static_cast<uint32_t>(rde[3]) << 8) |
+                              (static_cast<uint32_t>(rde[4]) << 16) |
+                              (static_cast<uint32_t>(rde[5]) << 24);
+    const uint32_t root_size = static_cast<uint32_t>(rde[10]) |
+                               (static_cast<uint32_t>(rde[11]) << 8) |
+                               (static_cast<uint32_t>(rde[12]) << 16) |
+                               (static_cast<uint32_t>(rde[13]) << 24);
+
+    auto root = list_iso_dir(root_lba, root_size);
+
+    // Pick the content root: UMD_VIDEO preferred, UMD_AUDIO as fallback.
+    uint32_t content_lba = 0, content_size = 0;
+    for (const auto& e : root) {
+        if (!e.is_dir) continue;
+        if (e.name == "UMD_VIDEO") {
+            content_lba = e.lba; content_size = e.size_bytes;
+            m_root = UmdRoot::Video; m_root_name = "UMD_VIDEO";
+            break;   // video wins outright
+        }
+        if (e.name == "UMD_AUDIO" && m_root == UmdRoot::None) {
+            content_lba = e.lba; content_size = e.size_bytes;
+            m_root = UmdRoot::Audio; m_root_name = "UMD_AUDIO";
+        }
+    }
+    if (m_root == UmdRoot::None) return;
+
+    // Walk the content root and its immediate sub-directories.
+    auto content = list_iso_dir(content_lba, content_size);
+    for (const auto& e : content) {
+        if (e.is_dir) {
+            auto sub = list_iso_dir(e.lba, e.size_bytes);
+            for (const auto& s : sub) {
+                if (s.is_dir) continue;
+                m_assets.push_back({s.name, m_root_name + "/" + e.name,
+                                    s.lba, s.size_bytes});
+            }
+        } else {
+            m_assets.push_back({e.name, m_root_name, e.lba, e.size_bytes});
+        }
+    }
+
+    std::sort(m_assets.begin(), m_assets.end(),
+              [](const UmdAsset& a, const UmdAsset& b) {
+                  if (a.dir != b.dir) return a.dir < b.dir;
+                  return a.name < b.name;
+              });
+
+    std::cout << "[IsoReader] Content root: " << m_root_name
+              << "  (" << m_assets.size() << " menu asset(s))\n";
 }
 
 // Scan UMD_VIDEO/ root (sector 24) for File Identifier Descriptors naming
@@ -205,6 +344,41 @@ bool IsoReader::parse_udf_stream_dir() {
 
 std::vector<MpsEntry> IsoReader::get_mps_entries() const {
     return m_entries;
+}
+
+const UmdAsset* IsoReader::find_asset(const std::string& name) const {
+    for (const auto& a : m_assets) {
+        if (a.name.size() != name.size()) continue;
+        bool eq = true;
+        for (size_t i = 0; i < a.name.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(a.name[i])) !=
+                std::tolower(static_cast<unsigned char>(name[i]))) { eq = false; break; }
+        }
+        if (eq) return &a;
+    }
+    return nullptr;
+}
+
+std::vector<UmdAsset> IsoReader::assets_in(const std::string& dir) const {
+    std::vector<UmdAsset> out;
+    // Accept either a bare sub-dir ("CLIPINF") or a rooted one ("UMD_VIDEO/CLIPINF").
+    std::string want = dir;
+    if (!m_root_name.empty()) {
+        if (dir.empty()) want = m_root_name;
+        else if (dir.rfind(m_root_name, 0) != 0) want = m_root_name + "/" + dir;
+    }
+    for (const auto& a : m_assets)
+        if (a.dir == want) out.push_back(a);
+    return out;
+}
+
+std::vector<uint8_t> IsoReader::read_asset(const UmdAsset& asset) const {
+    return read_file(asset.lba, asset.size_bytes);
+}
+
+std::vector<uint8_t> IsoReader::read_asset(const std::string& name) const {
+    const UmdAsset* a = find_asset(name);
+    return a ? read_file(a->lba, a->size_bytes) : std::vector<uint8_t>{};
 }
 
 std::vector<uint8_t> IsoReader::read_mps(const MpsEntry& entry) const {

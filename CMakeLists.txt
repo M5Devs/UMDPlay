@@ -70,6 +70,8 @@ add_library(umdplay_core STATIC
     src/recent.cpp
     src/gesture.cpp
     src/aspect.cpp
+    src/playlist_parser.cpp
+    src/rco_parser.cpp
 )
 target_link_libraries(umdplay_core PUBLIC
     ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES}
@@ -131,6 +133,16 @@ add_executable(test_gesture tests/test_gesture.cpp)
 target_link_libraries(test_gesture PRIVATE umdplay_core)
 target_compile_options(test_gesture PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME test_gesture COMMAND test_gesture)
+
+# Pure parsers: PLAYLIST.UMD (tracks + chapter markers) and .RCO containers.
+add_executable(test_playlist tests/test_playlist.cpp)
+target_link_libraries(test_playlist PRIVATE umdplay_core)
+target_compile_options(test_playlist PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME test_playlist COMMAND test_playlist)
+# When a real ISO is reachable it also parses the disc's PLAYLIST.UMD/.RCO.
+set_tests_properties(test_playlist PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    ENVIRONMENT "UMD_ISO=${PROJECT_SOURCE_DIR}/test_umd.iso")
 
 # The audio decoder test decodes a real stream when an ISO is reachable
 # (UMD_ISO env var or ./test_umd.iso) and degrades to state checks otherwise.

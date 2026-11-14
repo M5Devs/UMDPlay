@@ -147,9 +147,15 @@ SHIFT+LEFT/RIGHT      seek -30 s / +30 s
 drag the timeline     scrub to any position (releases into a seek)
 UP / DOWN             volume -5% / +5%
 M                     mute / unmute
+PageUp / [            previous chapter (restart current, else step back)
+PageDown / ]          next chapter
 F11 / Alt+Enter       toggle fullscreen
 ESC / BACKSPACE       stop and return to the Hub
 ```
+
+Chapters come from `PLAYLIST.UMD`: the hub's **Chapters** action opens a marker
+list for the main feature, and the player transport carries `|<` / `>|` buttons
+plus a `CH n/N` readout. Seeks snap to the exact marker timestamp.
 
 Seeking flushes the FFmpeg codec buffers, re-anchors the hand-demuxed PSMF
 ATRAC3+ reader on a real MPEG-PS pack boundary, resyncs video to the next

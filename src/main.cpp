@@ -4,6 +4,8 @@
 #include "wmc_ui.h"
 #include "clip_export.h"
 #include "recent.h"
+#include "playlist_parser.h"
+#include "rco_parser.h"
 
 #include "stb_image_write.h"   // declarations only (impl is in stb_impl.cpp)
 
@@ -35,6 +37,7 @@ struct Options {
     std::string start_strip;             // --strip recent|browse|settings
     bool        demo_player   = false;   // --demo-player: render the OSD, no ISO
     bool        open_settings = false;   // --open-settings: open the Settings overlay
+    bool        open_chapters = false;   // --open-chapters: open the Chapters panel
     std::string aspect_name;             // --aspect auto|16:9|4:3|fill
 };
 
@@ -52,6 +55,7 @@ void print_usage() {
         "  --demo                 render the hub with synthetic data (no ISO)\n"
         "  --demo-player          render the player OSD with synthetic data (no ISO)\n"
         "  --open-settings        open the in-player Settings overlay (with --demo-player)\n"
+        "  --open-chapters        open the Chapters panel (with --demo)\n"
         "  --aspect <mode>        Zoom mode: auto|16:9|4:3|fill\n";
 }
 
@@ -81,6 +85,8 @@ bool parse_args(int argc, char** argv, Options& opt) {
             opt.start_strip = argv[++i];
         } else if (a == "--open-settings") {
             opt.open_settings = true;
+        } else if (a == "--open-chapters") {
+            opt.open_chapters = true;
         } else if (a == "--aspect" && i + 1 < argc) {
             opt.aspect_name = argv[++i];
         } else if (a == "-h" || a == "--help") {
@@ -127,6 +133,43 @@ struct LibraryItem {
     std::vector<MpsEntry> entries;
 };
 
+// Load PLAYLIST.UMD chapters (of the main feature) into a DiscItem, and stash
+// the playlist header title. No-op when the disc has no PLAYLIST.UMD.
+void load_playlist(IsoReader& reader, DiscItem& d) {
+    const UmdAsset* pl = reader.find_asset("PLAYLIST.UMD");
+    if (!pl) return;
+    auto raw = reader.read_asset(*pl);
+    if (raw.empty()) return;
+    auto parsed = umdplay::parse_playlist(raw.data(), raw.size());
+    if (!parsed.valid) return;
+    d.playlist_title = parsed.title;
+
+    // Pick the main feature track (most markers / longest) and expose its
+    // markers as chapters. Prefer the track whose clip matches the main stream
+    // when possible, so extras/still tracks don't win on a marker tie.
+    const umdplay::PlaylistTrack* main = parsed.main_track();
+    if (!main) return;
+    for (const auto& s : d.streams) {
+        if (!s.is_main) continue;
+        // s.name is e.g. "00001.MPS"; the playlist clip id is "00001".
+        std::string id = s.name;
+        const size_t dot = id.find('.');
+        if (dot != std::string::npos) id.resize(dot);
+        for (const auto& t : parsed.tracks) {
+            if (t.clip_name == id && !t.markers.empty()) { main = &t; break; }
+        }
+        break;
+    }
+    int idx = 0;
+    for (const auto& mk : main->markers) {
+        ChapterItem c;
+        c.label   = mk.name.empty() ? ("Chapter " + std::to_string(idx + 1)) : mk.name;
+        c.seconds = mk.seconds;
+        d.chapters.push_back(std::move(c));
+        ++idx;
+    }
+}
+
 // Parse an ISO into a LibraryItem. Textures are created later by the caller.
 bool load_iso(const std::string& path, LibraryItem& out) {
     IsoReader reader(path);
@@ -153,8 +196,59 @@ bool load_iso(const std::string& path, LibraryItem& out) {
         s.is_main    = (e.size_bytes == max_size);
         d.streams.push_back(s);
     }
+    load_playlist(reader, d);   // real chapter markers (when present)
     out.entries = std::move(entries);
     return true;
+}
+
+// Extended --probe dump: PLAYLIST.UMD tracks/chapters + .RCO container summary.
+void print_disc_structure(const std::string& path) {
+    IsoReader reader(path);
+    if (!reader.open()) return;
+
+    std::cout << "    Root    : " << reader.root_name() << "\n";
+    std::cout << "    Assets  : " << reader.assets().size() << "\n";
+    for (const auto& a : reader.assets()) {
+        std::cout << "      - " << a.dir << "/" << a.name
+                  << "  (" << a.size_bytes << " B)\n";
+    }
+
+    if (const UmdAsset* pl = reader.find_asset("PLAYLIST.UMD")) {
+        auto raw = reader.read_asset(*pl);
+        auto parsed = umdplay::parse_playlist(raw.data(), raw.size());
+        std::cout << "    " << umdplay::playlist_summary(parsed);
+        const auto* main = parsed.main_track();
+        if (main) {
+            int ti = static_cast<int>(main - &parsed.tracks[0]);
+            auto ch = parsed.chapters(ti);
+            std::cout << "    Chapters (main track '" << main->name << "', clip "
+                      << main->clip_name << "): " << ch.size() << "\n";
+            for (const auto& c : ch) {
+                char ts[16];
+                const int hh = static_cast<int>(c.seconds) / 3600;
+                const int mm = (static_cast<int>(c.seconds) / 60) % 60;
+                const int ss = static_cast<int>(c.seconds) % 60;
+                std::snprintf(ts, sizeof(ts), "%02d:%02d:%02d", hh, mm, ss);
+                std::cout << "      " << (c.index + 1) << ". " << ts
+                          << "  " << c.label << "\n";
+            }
+        }
+    }
+
+    // Probe each RESOURCE/*.RCO.
+    for (const auto& a : reader.assets_in("RESOURCE")) {
+        auto raw = reader.read_asset(a);
+        auto rco = umdplay::parse_rco(raw.data(), raw.size());
+        std::cout << "    " << a.name << ": " << umdplay::rco_summary(rco);
+    }
+}
+
+// Current chapter for display: the parser's chapter_at, clamped to 0 when the
+// playhead is still before the first marker (so "CH 1/45" shows from the start).
+int current_chapter(const DiscItem& d, double t) {
+    if (d.chapters.empty()) return -1;
+    const int idx = umdplay::chapter_at(d.chapters, t);
+    return idx < 0 ? 0 : idx;
 }
 
 // Load ICON0.PNG / PIC1.PNG for a disc into SDL textures via the WMC context.
@@ -261,6 +355,14 @@ int main(int argc, char** argv) {
                 s.is_main = (i == 0);
                 d.streams.push_back(s);
             }
+            // Synthetic chapter markers so the Chapters panel can be exercised
+            // (and screenshotted) without a real disc.
+            for (int i = 0; i < 6; ++i) {
+                ChapterItem c;
+                c.label   = "Mark" + std::to_string((i + 1) * 4515);
+                c.seconds = i * 270.0;
+                d.chapters.push_back(std::move(c));
+            }
             LibraryItem it;
             it.disc = d;
             recent_items.push_back(it);
@@ -289,6 +391,8 @@ int main(int argc, char** argv) {
     }
 
     if (has_active) print_disc_summary(active.disc);
+    if (opt.probe_only && has_active && !active.disc.iso_path.empty())
+        print_disc_structure(active.disc.iso_path);
 
     // Headless clip export: no window needed, encode straight from the decoder.
     if (!opt.export_path.empty()) {
@@ -370,9 +474,11 @@ int main(int argc, char** argv) {
     int browse_sel = 0;
     int action_sel = 0;
     int extras_sel = 0;
+    int chapter_sel = 0;
     int setting_sel = 0;
     bool extras_open = false;
-
+    bool chapters_open = false;
+    if (opt.open_chapters) { chapters_open = true; action_sel = 1; }
     std::string browse_dir;
     {
         std::error_code ec;
@@ -511,6 +617,7 @@ int main(int argc, char** argv) {
         recent_sel = 0;
         action_sel = 0;
         extras_open = false;
+        chapters_open = false;
         strip = HubMode::Recent;
     };
 
@@ -598,7 +705,8 @@ int main(int argc, char** argv) {
             in = wmc.render_hub(ui.video_texture(), ui.video_width(), ui.video_height(),
                                 recent_cards, recent_sel,
                                 browse_entries, browse_sel, browse_dir,
-                                strip, action_sel, extras_open, extras_sel, setting_sel,
+                                strip, action_sel, extras_open, extras_sel,
+                                chapters_open, chapter_sel, setting_sel,
                                 now_playing, /*loading=*/false,
                                 ui.is_fullscreen(), ui.volume(), ui.muted(), now());
 
@@ -632,6 +740,23 @@ int main(int argc, char** argv) {
                         std::cout << "[*] Playing bonus stream: "
                                   << active.disc.streams[in.stream_index].name << "\n";
                         if (open_stream(in.stream_index)) { mode = Mode::Player; paused = false; osd_visible = true; }
+                    }
+                    break;
+                case WmcAction::PlayChapter:
+                    // Jump straight to a chapter: open the main stream, seek to
+                    // the marker, then switch to fullscreen playback.
+                    if (!active.disc.chapters.empty() && in.chapter_index >= 0 &&
+                        in.chapter_index < static_cast<int>(active.disc.chapters.size())) {
+                        const double target = active.disc.chapters[in.chapter_index].seconds;
+                        std::cout << "[*] Jumping to chapter " << (in.chapter_index + 1)
+                                  << " @ " << target << "s\n";
+                        if (!decoder_open) open_stream(main_stream_index());
+                        if (decoder_open) {
+                            decoder.seek_absolute(target);
+                            elapsed = decoder.current_time();
+                            ui.clear_audio_queue();
+                            mode = Mode::Player; paused = false; osd_visible = true;
+                        }
                     }
                     break;
                 case WmcAction::ToggleFullscreen:
@@ -673,6 +798,10 @@ int main(int argc, char** argv) {
                 mi.sample_rate  = decoder.audio_sample_rate();
                 mi.deinterlace  = decoder.deinterlace_enabled();
                 mi.interlaced   = decoder.last_frame_interlaced();
+                mi.chapter_count = static_cast<int>(active.disc.chapters.size());
+                mi.chapter       = current_chapter(active.disc, elapsed);
+                if (mi.chapter >= 0)
+                    mi.chapter_label = active.disc.chapters[mi.chapter].label;
 
                 in = wmc.render_player(ui.video_texture(), ui.video_width(), ui.video_height(),
                                        active.disc, sname, paused, elapsed, total, osd_visible,
@@ -700,6 +829,22 @@ int main(int argc, char** argv) {
                         elapsed = decoder.current_time();
                         ui.clear_audio_queue();
                         break;
+                    case WmcAction::PrevChapter:
+                    case WmcAction::NextChapter: {
+                        const int dir = (in.action == WmcAction::PrevChapter) ? -1 : 1;
+                        const int ci = umdplay::chapter_step(active.disc.chapters, elapsed, dir);
+                        if (ci >= 0) {
+                            const double target = active.disc.chapters[ci].seconds;
+                            decoder.seek_absolute(target);
+                            elapsed = decoder.current_time();
+                            ui.clear_audio_queue();
+                            std::cout << "[*] Chapter " << (ci + 1) << "/"
+                                      << active.disc.chapters.size() << " @ "
+                                      << target << "s ("
+                                      << active.disc.chapters[ci].label << ")\n";
+                        }
+                        break;
+                    }
                     case WmcAction::ToggleDeinterlace:
                         decoder.set_deinterlace(!decoder.deinterlace_enabled());
                         break;
