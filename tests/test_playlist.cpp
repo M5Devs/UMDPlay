@@ -10,11 +10,13 @@
 #include "iso_reader.h"
 #include "playlist_parser.h"
 #include "rco_parser.h"
+#include "vsmx_vm.h"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -188,28 +190,162 @@ void test_playlist_rejects() {
     CHECK(!umdplay::parse_playlist(raw5.data(), raw5.size()).valid);
 }
 
+// --- synthetic VSMX cases ------------------------------------------------
+
+// Build a VSMX blob: signature + header + a code array + string tables.
+std::vector<uint8_t> make_vsmx(const std::vector<std::pair<uint32_t,uint32_t>>& code,
+                               const std::vector<std::string>& texts,
+                               const std::vector<std::string>& props,
+                               const std::vector<std::string>& names) {
+    auto put_le32 = [](std::vector<uint8_t>& b, size_t off, uint32_t v) {
+        b[off] = v & 0xff; b[off+1] = (v >> 8) & 0xff;
+        b[off+2] = (v >> 16) & 0xff; b[off+3] = (v >> 24) & 0xff;
+    };
+    // Lay out: header(52) | code | texts | props | names.
+    std::vector<uint8_t> code_bytes;
+    for (auto& g : code) {
+        std::vector<uint8_t> t(8, 0);
+        put_le32(t, 0, g.first); put_le32(t, 4, g.second);
+        code_bytes.insert(code_bytes.end(), t.begin(), t.end());
+    }
+    auto enc16 = [](const std::vector<std::string>& v) {
+        std::vector<uint8_t> o;
+        for (auto& s : v) { for (char c : s) { o.push_back((uint8_t)c); o.push_back(0); }
+                            o.push_back(0); o.push_back(0); }
+        return o;
+    };
+    auto enc8 = [](const std::vector<std::string>& v) {
+        std::vector<uint8_t> o;
+        for (auto& s : v) { for (char c : s) o.push_back((uint8_t)c); o.push_back(0); }
+        return o;
+    };
+    auto code_b = code_bytes;
+    auto text_b = enc16(texts);
+    auto prop_b = enc16(props);
+    auto name_b = enc8(names);
+
+    std::vector<uint8_t> b(52, 0);
+    std::memcpy(b.data(), "VSMX", 4);
+    put_le32(b, 0x04, 0x00010000);
+    size_t off = 52;
+    put_le32(b, 0x08, (uint32_t)off); put_le32(b, 0x0C, (uint32_t)code_b.size());
+    off += code_b.size();
+    put_le32(b, 0x10, (uint32_t)off); put_le32(b, 0x14, (uint32_t)text_b.size());
+    put_le32(b, 0x18, (uint32_t)texts.size());
+    off += text_b.size();
+    put_le32(b, 0x1C, (uint32_t)off); put_le32(b, 0x20, (uint32_t)prop_b.size());
+    put_le32(b, 0x24, (uint32_t)props.size());
+    off += prop_b.size();
+    put_le32(b, 0x28, (uint32_t)off); put_le32(b, 0x2C, (uint32_t)name_b.size());
+    put_le32(b, 0x30, (uint32_t)names.size());
+    b.insert(b.end(), code_b.begin(), code_b.end());
+    b.insert(b.end(), text_b.begin(), text_b.end());
+    b.insert(b.end(), prop_b.begin(), prop_b.end());
+    b.insert(b.end(), name_b.begin(), name_b.end());
+    return b;
+}
+
+// A native object that records the calls made to it.
+struct RecordingNative : umdplay::VsmxNative {
+    std::vector<std::string> calls;
+    std::string name() const override { return "rec"; }
+    umdplay::VsmxValue call(const std::string& m,
+                            const std::vector<umdplay::VsmxValue>&) override {
+        calls.push_back(m);
+        if (m == "answer") return umdplay::VsmxValue::number(42);
+        return umdplay::VsmxValue();
+    }
+};
+
+void test_vsmx_synthetic() {
+    using namespace umdplay;
+    // Program:  x = 3;  y = x + 4;  rec.probe();  z = rec.answer();
+    const int VID = 0; (void)VID;
+    std::vector<std::pair<uint32_t,uint32_t>> code = {
+        {VSMX_VARIABLE, 0}, {VSMX_CONST_INT, 3}, {VSMX_ASSIGN, 0}, {VSMX_END_STMT, 0},
+        {VSMX_VARIABLE, 1}, {VSMX_VARIABLE, 0}, {VSMX_CONST_INT, 4}, {VSMX_ADD, 0},
+        {VSMX_ASSIGN, 0}, {VSMX_END_STMT, 0},
+        {VSMX_VARIABLE, 2}, {VSMX_METHOD, 0}, {VSMX_CALL_METHOD, 0}, {VSMX_END_STMT, 0},
+        {VSMX_VARIABLE, 3}, {VSMX_VARIABLE, 2}, {VSMX_METHOD, 1},
+        {VSMX_CALL_METHOD, 0}, {VSMX_ASSIGN, 0}, {VSMX_END_STMT, 0},
+        {VSMX_END, 0},
+    };
+    auto raw = make_vsmx(code, {}, {"probe", "answer"}, {"x", "y", "rec", "z"});
+    auto prog = decode_vsmx(raw.data(), raw.size());
+    CHECK(prog.valid);
+    CHECK(prog.code.size() == code.size());
+    CHECK(prog.names.size() == 4);
+    CHECK(prog.properties.size() == 2);
+    CHECK(std::string(vsmx_opcode_name(VSMX_ADD)) == "ADD");
+    CHECK(!disassemble(prog).empty());
+    CHECK(!vsmx_opcode_histogram(prog).empty());
+
+    auto rec = std::make_shared<RecordingNative>();
+    VsmxMachine vm(prog);
+    vm.bind("rec", rec);
+    CHECK(vm.run());
+    CHECK(vm.last_error().empty());
+    CHECK(rec->calls.size() == 2);
+    CHECK(rec->calls.size() >= 1 && rec->calls[0] == "probe");
+
+    // Reject a non-VSMX blob.
+    uint8_t junk[64] = {0};
+    CHECK(!decode_vsmx(junk, sizeof(junk)).valid);
+    CHECK(!decode_vsmx(nullptr, 0).valid);
+}
+
 // --- synthetic .RCO cases ------------------------------------------------
 
 std::vector<uint8_t> make_rco() {
-    std::vector<uint8_t> b(0x200, 0);
+    std::vector<uint8_t> b(0x400, 0);
     b[0] = 0x00; b[1] = 'P'; b[2] = 'R'; b[3] = 'F';
     put_be32(b, 0x04, 0x80);           // version (stored LE on disk; see below)
     // version is LE: write 0x80 little-endian.
     b[0x04] = 0x80; b[0x05] = 0x00; b[0x06] = 0x00; b[0x07] = 0x00;
-    // TOC entry 0: offset 0xa4, size 0xcc (little-endian).
-    b[0x10] = 0xa4; b[0x11] = 0x00; b[0x12] = 0x00; b[0x13] = 0x00;
-    b[0x14] = 0xcc; b[0x15] = 0x00; b[0x16] = 0x00; b[0x17] = 0x00;
-    // TOC entry 1: absent (0xFFFFFFFF / 0xFFFFFFFF).
-    for (int i = 0x18; i < 0x20; ++i) b[i] = 0xff;
-    // A fake PNG (signature + IHDR dims + IEND) at 0x100.
+    b[0x0c] = 0x01;                    // compression: low nibble = UMD
+
+    auto le32 = [&](size_t off, uint32_t v) {
+        b[off] = v & 0xff; b[off+1] = (v >> 8) & 0xff;
+        b[off+2] = (v >> 16) & 0xff; b[off+3] = (v >> 24) & 0xff;
+    };
+    // Header: pMain=0xa4, pImg=0x180, pLabelData=0x300, pEventData=0x380,
+    // pImgData=0x200.
+    le32(0x10, 0xa4);      // pMain
+    le32(0x24, 0x180);     // pImg
+    le32(0x40, 0x300);     // pLabelData
+    le32(0x44, 0x40);      // lLabelData
+    le32(0x48, 0x380);     // pEventData
+    le32(0x4c, 0x20);      // lEventData
+    le32(0x80, 0x200);     // pImgData
+    le32(0x84, 0x100);     // lImgData
+
+    // Labels: "main1\0" at 0x300.
+    std::memcpy(b.data() + 0x300, "main1", 5);
+    // Events: "script:/x\0" at 0x380.
+    std::memcpy(b.data() + 0x380, "script:/x", 9);
+
+    // MAIN entry at 0xa4: type=1 id=1, labelOffset=0, numSub=1, child at 0xcc.
+    b[0xa4] = 0x01; b[0xa4 + 1] = 0x01;      // type=1 id=MAIN
+    le32(0xa4 + 4, 0xffffffff);              // no label
+    le32(0xa4 + 12, 40);                     // entrySize
+    le32(0xa4 + 16, 1);                      // numSubEntries
+    // Child IMG entry at 0xcc: type=1 id=4, label 0, sizePacked, offset 0.
+    b[0xcc] = 0x01; b[0xcc + 1] = 0x04;      // type=1 id=IMG
+    le32(0xcc + 4, 0);                       // labelOffset -> "main1"
+    le32(0xcc + 12, 0);                      // entrySize
+    le32(0xcc + 16, 0);                      // numSub
+    b[0xcc + 40] = 0x00; b[0xcc + 41] = 0x00;   // format PNG
+    b[0xcc + 42] = 0x00; b[0xcc + 43] = 0x00;   // compression none
+    le32(0xcc + 44, 24);                     // sizePacked
+    le32(0xcc + 48, 0);                      // img offset
+
+    // A fake PNG (signature + IHDR dims + IEND) at pImgData (0x200).
     const uint8_t png[] = {0x89,'P','N','G','\r','\n',0x1a,'\n',
                            0,0,0,13,'I','H','D','R'};
-    std::memcpy(b.data() + 0x100, png, sizeof(png));
-    put_be32(b, 0x100 + 16, 252);   // width
-    put_be32(b, 0x100 + 20, 30);    // height
-    std::memcpy(b.data() + 0x130, "IEND", 4);
-    // A VSMX block at 0x180.
-    std::memcpy(b.data() + 0x180, "VSMX", 4);
+    std::memcpy(b.data() + 0x200, png, sizeof(png));
+    put_be32(b, 0x200 + 16, 252);   // width
+    put_be32(b, 0x200 + 20, 30);    // height
+    std::memcpy(b.data() + 0x218, "IEND", 4);
     return b;
 }
 
@@ -222,9 +358,7 @@ void test_rco_synthetic() {
     CHECK(r.images.size() == 1);
     CHECK(r.images[0].width == 252);
     CHECK(r.images[0].height == 30);
-    CHECK(r.has_vsmx);
-    CHECK(r.vsmx_offset == 0x180);
-    CHECK(!r.toc.empty());
+    CHECK(r.images[0].name == "main1");
     CHECK(!umdplay::rco_summary(r).empty());
 
     // Rejections.
@@ -341,6 +475,59 @@ void test_real_disc() {
         auto r = umdplay::parse_rco(rco_raw.data(), rco_raw.size());
         CHECK(r.valid);
         std::printf("%s", umdplay::rco_summary(r).c_str());
+        // The disc's menu object tree should expose at least one page.
+        CHECK(!r.pages().empty());
+
+        // Decode and disassemble the embedded VSMX, then actually run it with a
+        // stub controller to prove the interpreter executes real menu logic.
+        if (r.vsmx.present && r.vsmx.offset + r.vsmx.size <= rco_raw.size()) {
+            auto prog = umdplay::decode_vsmx(rco_raw.data() + r.vsmx.offset,
+                                             r.vsmx.size);
+            CHECK(prog.valid);
+            CHECK(!prog.code.empty());
+            CHECK(!prog.names.empty());
+            std::printf("[*] VSMX: %zu instructions, %zu strings, %zu props, %zu names\n",
+                        prog.code.size(), prog.texts.size(),
+                        prog.properties.size(), prog.names.size());
+            std::printf("    %s\n", umdplay::vsmx_opcode_histogram(prog).c_str());
+
+            struct StubController : umdplay::VsmxNative {
+                std::vector<std::string> calls;
+                std::string name() const override { return "controller"; }
+                umdplay::VsmxValue call(const std::string& m,
+                    const std::vector<umdplay::VsmxValue>&) override {
+                    calls.push_back(m);
+                    if (m == "playStatus") return umdplay::VsmxValue::number(0);
+                    return umdplay::VsmxValue();
+                }
+                umdplay::VsmxValue get(const std::string&) override {
+                    return umdplay::VsmxValue::number(0);
+                }
+            };
+            struct StubMovie : umdplay::VsmxNative {
+                std::vector<std::string> calls;
+                std::string name() const override { return "movieplayer"; }
+                umdplay::VsmxValue call(const std::string& m,
+                    const std::vector<umdplay::VsmxValue>&) override {
+                    calls.push_back(m);
+                    return umdplay::VsmxValue();
+                }
+            };
+            auto ctrl = std::make_shared<StubController>();
+            auto movie = std::make_shared<StubMovie>();
+            umdplay::VsmxMachine vm(prog);
+            vm.bind("controller", ctrl);
+            vm.bind("movieplayer", movie);
+            CHECK(vm.run());
+            CHECK(vm.last_error().empty());
+
+            // Drive a real event: onAutoPlay must call into the host.
+            const bool dispatched = vm.call_event("script:/main/onAutoPlay");
+            CHECK(dispatched);
+            CHECK(!ctrl->calls.empty() || !movie->calls.empty());
+            std::printf("[*] VSMX onAutoPlay ran: controller=%zu movieplayer=%zu host calls\n",
+                        ctrl->calls.size(), movie->calls.size());
+        }
     }
 }
 
@@ -350,6 +537,7 @@ int main() {
     test_playlist_synthetic();
     test_playlist_rejects();
     test_rco_synthetic();
+    test_vsmx_synthetic();
     test_chapter_nav();
     test_real_disc();
 
@@ -357,6 +545,6 @@ int main() {
         std::printf("[-] %d playlist/rco check(s) failed.\n", g_failures);
         return 1;
     }
-    std::printf("All playlist + RCO tests passed!\n");
+    std::printf("All playlist + RCO + VSMX tests passed!\n");
     return 0;
 }

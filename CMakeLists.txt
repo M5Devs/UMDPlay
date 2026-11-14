@@ -72,6 +72,7 @@ add_library(umdplay_core STATIC
     src/aspect.cpp
     src/playlist_parser.cpp
     src/rco_parser.cpp
+    src/vsmx_vm.cpp
 )
 target_link_libraries(umdplay_core PUBLIC
     ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES}

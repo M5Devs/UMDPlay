@@ -6,6 +6,7 @@
 #include "recent.h"
 #include "playlist_parser.h"
 #include "rco_parser.h"
+#include "vsmx_vm.h"
 
 #include "stb_image_write.h"   // declarations only (impl is in stb_impl.cpp)
 
@@ -39,6 +40,7 @@ struct Options {
     bool        open_settings = false;   // --open-settings: open the Settings overlay
     bool        open_chapters = false;   // --open-chapters: open the Chapters panel
     std::string aspect_name;             // --aspect auto|16:9|4:3|fill
+    bool        verbose = false;         // --verbose: full VSMX disassembly in --probe
 };
 
 void print_usage() {
@@ -52,6 +54,7 @@ void print_usage() {
         "  --fullscreen           start in fullscreen (F11 / Alt+Enter toggles)\n"
         "  --strip <name>         start on a hub strip: recent|browse|settings\n"
         "  --probe                print stream/metadata info and exit\n"
+        "  --verbose              with --probe: disassemble the menu VSMX script\n"
         "  --demo                 render the hub with synthetic data (no ISO)\n"
         "  --demo-player          render the player OSD with synthetic data (no ISO)\n"
         "  --open-settings        open the in-player Settings overlay (with --demo-player)\n"
@@ -72,6 +75,8 @@ bool parse_args(int argc, char** argv, Options& opt) {
             opt.start_seconds = std::atof(argv[++i]);
         } else if (a == "--probe") {
             opt.probe_only = true;
+        } else if (a == "--verbose") {
+            opt.verbose = true;
         } else if (a == "--play") {
             opt.autoplay = true;
         } else if (a == "--demo") {
@@ -202,7 +207,7 @@ bool load_iso(const std::string& path, LibraryItem& out) {
 }
 
 // Extended --probe dump: PLAYLIST.UMD tracks/chapters + .RCO container summary.
-void print_disc_structure(const std::string& path) {
+void print_disc_structure(const std::string& path, bool opt_verbose) {
     IsoReader reader(path);
     if (!reader.open()) return;
 
@@ -235,11 +240,47 @@ void print_disc_structure(const std::string& path) {
         }
     }
 
-    // Probe each RESOURCE/*.RCO.
+    // Probe each RESOURCE/*.RCO: container summary, menu object tree and the
+    // embedded VSMX script (decoded + histogram; disassembly with --verbose).
     for (const auto& a : reader.assets_in("RESOURCE")) {
         auto raw = reader.read_asset(a);
         auto rco = umdplay::parse_rco(raw.data(), raw.size());
         std::cout << "    " << a.name << ": " << umdplay::rco_summary(rco);
+
+        auto pages = rco.pages();
+        for (uint32_t page : pages) {
+            const auto* p = rco.object(page);
+            if (!p) continue;
+            auto kids = rco.children_of(page);
+            std::cout << "      page '" << p->name << "'  children="
+                      << kids.size() << "\n";
+            for (uint32_t kid : kids) {
+                const auto* k = rco.object(kid);
+                if (!k) continue;
+                std::cout << "        - " << k->name << "  type=" << k->type;
+                if (!k->on_push_event.empty())
+                    std::cout << "  onPush=" << k->on_push_event;
+                std::cout << "\n";
+            }
+        }
+
+        if (rco.vsmx.present &&
+            static_cast<uint64_t>(rco.vsmx.offset) + rco.vsmx.size <=
+                raw.size()) {
+            auto prog = umdplay::decode_vsmx(raw.data() + rco.vsmx.offset,
+                                             rco.vsmx.size);
+            if (prog.valid) {
+                std::cout << "      VSMX '" << rco.vsmx.name << "': "
+                          << prog.code.size() << " instructions, "
+                          << prog.texts.size() << " strings, "
+                          << prog.properties.size() << " props, "
+                          << prog.names.size() << " names\n";
+                std::cout << "        " << umdplay::vsmx_opcode_histogram(prog)
+                          << "\n";
+                if (opt_verbose)
+                    std::cout << umdplay::disassemble(prog);
+            }
+        }
     }
 }
 
@@ -392,7 +433,7 @@ int main(int argc, char** argv) {
 
     if (has_active) print_disc_summary(active.disc);
     if (opt.probe_only && has_active && !active.disc.iso_path.empty())
-        print_disc_structure(active.disc.iso_path);
+        print_disc_structure(active.disc.iso_path, opt.verbose);
 
     // Headless clip export: no window needed, encode straight from the decoder.
     if (!opt.export_path.empty()) {
