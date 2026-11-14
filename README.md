@@ -61,6 +61,7 @@ Usage: umdplay <path_to_umd_video.iso> [options]
   --screenshot <png>     render a frame, write a PNG, then exit
   --start <seconds>      start at this offset
   --probe                print stream/metadata info and exit
+  --demo                 render the hub with synthetic data (no ISO)
 ```
 
 **Headless clip export** decodes the main `.MPS` stream and muxes H.264 video

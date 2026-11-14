@@ -25,6 +25,7 @@ struct Options {
     double      clip_seconds  = 12.0;
     bool        probe_only    = false;
     bool        autoplay      = false;   // --play: skip the Hub, start the main stream
+    bool        demo          = false;   // --demo: render a synthetic hub, no ISO
 };
 
 void print_usage() {
@@ -35,7 +36,8 @@ void print_usage() {
         "  --clip-seconds <n>     clip length in seconds (default 12)\n"
         "  --screenshot <png>     render a frame, write a PNG, then exit\n"
         "  --start <seconds>      start at this offset\n"
-        "  --probe                print stream/metadata info and exit\n";
+        "  --probe                print stream/metadata info and exit\n"
+        "  --demo                 render the hub with synthetic data (no ISO)\n";
 }
 
 bool parse_args(int argc, char** argv, Options& opt) {
@@ -53,6 +55,8 @@ bool parse_args(int argc, char** argv, Options& opt) {
             opt.probe_only = true;
         } else if (a == "--play") {
             opt.autoplay = true;
+        } else if (a == "--demo") {
+            opt.demo = true;
         } else if (a == "-h" || a == "--help") {
             print_usage();
             return false;
@@ -93,68 +97,78 @@ void push_key(SDL_Keycode sym, bool down) {
 
 int main(int argc, char** argv) {
     Options opt;
-    if (!parse_args(argc, argv, opt) || opt.iso_path.empty()) {
+    if (!parse_args(argc, argv, opt)) {
+        return 1;
+    }
+    if (opt.iso_path.empty() && !opt.demo) {
         print_usage();
         return 1;
     }
 
     std::cout << "=== UMDPlay Preservation Engine (Phase 3 - WMC UI) ===\n";
-    std::cout << "[*] Inspecting ISO: " << opt.iso_path << "\n";
 
-    IsoReader reader(opt.iso_path);
-    if (!reader.open()) {
-        std::cerr << "[-] Failed to read UMD Video filesystem!\n";
-        return 1;
-    }
-
-    const auto entries = reader.get_mps_entries();
-    if (entries.empty()) {
-        std::cerr << "[-] No .MPS streams found!\n";
-        return 1;
-    }
-
-    // Build the disc model for the UI.
     DiscItem disc;
-    disc.iso_path = opt.iso_path;
-    disc.title    = reader.param().title;
-    disc.disc_id  = reader.param().disc_id;
-    disc.category = reader.param().category;
+    std::vector<MpsEntry> entries;
+    std::vector<uint8_t> icon_png, pic1_png;
+    bool has_iso = false;
 
-    uint32_t max_size = 0;
-    for (const auto& e : entries) max_size = std::max(max_size, e.size_bytes);
-    for (const auto& e : entries) {
-        StreamItem s;
-        s.name       = e.name;
-        s.size_bytes = e.size_bytes;
-        s.is_main    = (e.size_bytes == max_size);
-        disc.streams.push_back(s);
-    }
-
-    UiManager ui;
-    if (!ui.init("UMDPlay - Windows Media Center UI", 1280, 720)) {
-        std::cerr << "[-] Failed to initialize SDL window/renderer!\n";
-        return 1;
-    }
-
-    // Load ICON0.PNG / PIC1.PNG into SDL textures via a temporary WMC context.
-    {
-        WmcUi tex;
-        if (tex.init(ui.window(), ui.renderer(), disc.title)) {
-            if (reader.has_metadata("ICON0.PNG")) {
-                disc.icon = tex.texture_from_png(reader.read_metadata("ICON0.PNG"));
-            }
-            if (reader.has_metadata("PIC1.PNG")) {
-                disc.pic1 = tex.texture_from_png(reader.read_metadata("PIC1.PNG"));
-            }
-            tex.close();
+    // --demo builds a synthetic disc so the UI can be exercised without an ISO
+    // (keeps CI free of copyrighted assets).
+    if (opt.demo) {
+        disc.title    = "\u30c7\u30e2 UMD Video (Demo)";
+        disc.disc_id  = "UMDPLAY-DEMO";
+        disc.category = "UMD_VIDEO";
+        const char* names[] = {"00001.MPS", "00002.MPS", "00003.MPS"};
+        const uint32_t sizes[] = {1500000000u, 4000000u, 1200000u};
+        for (int i = 0; i < 3; ++i) {
+            StreamItem s;
+            s.name = names[i];
+            s.size_bytes = sizes[i];
+            s.is_main = (i == 0);
+            disc.streams.push_back(s);
         }
+    } else {
+        std::cout << "[*] Inspecting ISO: " << opt.iso_path << "\n";
+
+        IsoReader reader(opt.iso_path);
+        if (!reader.open()) {
+            std::cerr << "[-] Failed to read UMD Video filesystem!\n";
+            return 1;
+        }
+
+        entries = reader.get_mps_entries();
+        if (entries.empty()) {
+            std::cerr << "[-] No .MPS streams found!\n";
+            return 1;
+        }
+
+        disc.iso_path = opt.iso_path;
+        disc.title    = reader.param().title;
+        disc.disc_id  = reader.param().disc_id;
+        disc.category = reader.param().category;
+
+        uint32_t max_size = 0;
+        for (const auto& e : entries) max_size = std::max(max_size, e.size_bytes);
+        for (const auto& e : entries) {
+            StreamItem s;
+            s.name       = e.name;
+            s.size_bytes = e.size_bytes;
+            s.is_main    = (e.size_bytes == max_size);
+            disc.streams.push_back(s);
+        }
+        if (reader.has_metadata("ICON0.PNG")) icon_png = reader.read_metadata("ICON0.PNG");
+        if (reader.has_metadata("PIC1.PNG"))  pic1_png = reader.read_metadata("PIC1.PNG");
+        has_iso = true;
     }
 
     print_disc_summary(disc);
 
     // Headless clip export: no window needed, encode straight from the decoder.
     if (!opt.export_path.empty()) {
-        ui.close();
+        if (!has_iso || entries.empty()) {
+            std::cerr << "[-] --export-clip needs a real ISO (not --demo).\n";
+            return 1;
+        }
         MpsEntry main_entry = entries[0];
         for (const auto& e : entries) {
             if (e.size_bytes > main_entry.size_bytes) main_entry = e;
@@ -166,6 +180,22 @@ int main(int argc, char** argv) {
         std::cout << (ok ? "[+] Clip written: " : "[-] Clip export failed: ")
                   << opt.export_path << "\n";
         return ok ? 0 : 1;
+    }
+
+    UiManager ui;
+    if (!ui.init("UMDPlay - Windows Media Center UI", 1280, 720)) {
+        std::cerr << "[-] Failed to initialize SDL window/renderer!\n";
+        return 1;
+    }
+
+    // Decode ICON0.PNG / PIC1.PNG into SDL textures via a temporary WMC context.
+    if (!icon_png.empty() || !pic1_png.empty()) {
+        WmcUi tex;
+        if (tex.init(ui.window(), ui.renderer(), disc.title)) {
+            if (!icon_png.empty()) disc.icon = tex.texture_from_png(icon_png);
+            if (!pic1_png.empty()) disc.pic1 = tex.texture_from_png(pic1_png);
+            tex.close();
+        }
     }
 
     if (opt.probe_only) {
@@ -222,7 +252,7 @@ int main(int argc, char** argv) {
             if (m.name == s.name) { e.lba = m.lba; break; }
         }
         close_decoder();
-        if (!decoder.open_stream(opt.iso_path, e)) return false;
+        if (!has_iso || !decoder.open_stream(opt.iso_path, e)) return false;
         decoder_open = true;
         fps = decoder.get_fps();
         if (fps <= 0.0 || fps > 120.0) fps = 29.97;

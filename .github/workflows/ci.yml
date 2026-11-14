@@ -1,4 +1,3 @@
-#.github/workflows/ci.yml
 name: CI Build
 
 on:
@@ -6,7 +5,7 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch: # تشغيل يدوي بضغطة زرار من GitHub Actions!
+  workflow_dispatch:
 
 jobs:
   build-linux:
@@ -23,15 +22,34 @@ jobs:
           sudo apt-get install -y cmake build-essential pkg-config \
                                   libavformat-dev libavcodec-dev libavutil-dev \
                                   libswscale-dev libswresample-dev \
-                                  libsdl2-dev
+                                  libsdl2-dev xvfb
 
       - name: Configure CMake
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        # Treat project warnings as errors so CI enforces the zero-warning bar.
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Werror"
 
       - name: Build UMDPlay Executable
-        run: cmake --build build --config Release
+        run: cmake --build build --config Release -j"$(nproc)"
+
+      - name: Run Tests
+        working-directory: build
+        run: ctest --output-on-failure
 
       - name: Verify Binary (Headless)
         run: |
           ls -lh build/bin/umdplay
           SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ./build/bin/umdplay || true
+
+      - name: Verify 10-foot UI Renders (Xvfb)
+        # --demo renders the hub with synthetic data (no copyrighted assets),
+        # so this catches UI/ImGui regressions on every run.
+        run: |
+          xvfb-run -a -s "-screen 0 1280x720x24" \
+            ./build/bin/umdplay --demo --screenshot /tmp/wmc_ui.png
+          ls -lh /tmp/wmc_ui.png
+
+      - name: Upload UI Screenshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: wmc-ui-preview
+          path: /tmp/wmc_ui.png
