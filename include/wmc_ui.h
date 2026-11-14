@@ -26,6 +26,12 @@ struct DiscItem {
     SDL_Texture*             icon = nullptr;   // ICON0.PNG
     SDL_Texture*             pic1 = nullptr;   // PIC1.PNG (optional)
 
+    // Presence of the on-disc metadata files (independent of texture loading,
+    // so headless --probe reports them correctly).
+    bool has_icon = false;                     // ICON0.PNG
+    bool has_pic1 = false;                     // PIC1.PNG
+    bool has_snd0 = false;                     // SND0.AT3
+
     bool is_demo = false;                      // synthetic entry (--demo)
 };
 
