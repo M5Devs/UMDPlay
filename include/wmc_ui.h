@@ -5,6 +5,9 @@
 #include <string>
 #include <vector>
 
+#include "aspect.h"
+#include "gesture.h"
+
 struct ImFont;
 struct ImDrawList;
 
@@ -15,7 +18,7 @@ struct StreamItem {
     bool        is_main    = false;
 };
 
-// A disc (one ISO) shown as a carousel card.
+// A disc (one ISO) shown as a carousel tile.
 struct DiscItem {
     std::string              iso_path;
     std::string              title;      // PARAM.SFO TITLE
@@ -35,11 +38,13 @@ struct DiscItem {
     bool is_demo = false;                      // synthetic entry (--demo)
 };
 
-// What the hub is currently showing.
+// What the hub is currently showing. `NowPlaying` is the cross-axis category
+// that returns to fullscreen playback and only appears while a stream is open.
 enum class HubMode {
-    Recent,       // the Recent Discs strip
-    Browse,       // the Browse System (folder/file) strip
-    Settings      // the Options strip
+    Recent,       // the Recent Discs category
+    Browse,       // the Browse System (folder/file) category
+    Settings,     // the Options category
+    NowPlaying    // jump back into playback (only while a stream is open)
 };
 
 // One entry in the Browse System listing (a folder or a .iso file).
@@ -48,6 +53,30 @@ struct BrowseEntry {
     std::string path;
     bool        is_dir = false;
     bool        is_iso = false;
+};
+
+// Live "Now Playing" summary for the hub PIP card.
+struct NowPlaying {
+    bool        active = false;
+    bool        paused = false;
+    std::string title;
+    std::string stream;
+    double      elapsed = 0.0;
+    double      total   = 0.0;
+};
+
+// Static media facts for the in-player Settings "Media Info" readout.
+struct PlayerMediaInfo {
+    std::string sfo_title;
+    std::string video_codec;
+    int         video_w = 0, video_h = 0;
+    double      fps = 0.0;
+    float       par = 1.0f;
+    size_t      stride = 0;
+    bool        psmf_audio = false;
+    int         sample_rate = 0;
+    bool        deinterlace = true;
+    bool        interlaced = false;
 };
 
 // Navigation intents emitted by the UI, consumed by main().
@@ -60,6 +89,7 @@ enum class WmcAction {
     BrowseEnter,        // descend into the folder at `iso_path`
     BrowseUp,           // go to the parent folder
     BackToHub,          // Esc in player mode
+    BackToPlayback,     // hub PIP / transport: resume fullscreen playback
     TogglePause,
     SeekBackward,
     SeekForward,
@@ -67,6 +97,8 @@ enum class WmcAction {
     Stop,               // stop playback, return to the Hub
     SeekTo,             // seek bar drag (absolute seconds in `seek_seconds`)
     ToggleFullscreen,
+    ToggleDeinterlace,
+    SetAspect,          // new zoom mode in `aspect_mode`
     VolumeChanged,      // new gain in `volume`
     MuteToggled
 };
@@ -78,11 +110,14 @@ struct WmcInput {
     int       stream_index = -1;
     float     volume = 1.0f;
     std::string iso_path;
+    aspect::Mode aspect_mode = aspect::Mode::Auto;
 };
 
-// Windows Media Center inspired 10-foot interface: an animated cobalt backdrop
-// with horizontal strips (Recent / Browse / Options), a disc carousel with
-// clean Play / Extras / Options actions, and a translucent player transport OSD.
+// Windows Media Center inspired 10-foot interface. A signature WMC cross-axis
+// hub (vertical categories + horizontal glass tiles) over an animated aurora,
+// with an animated 2D spinning UMD logo, an HH:MM clock, a mini "Now Playing"
+// PIP and glossy transport. The player carries a translucent Settings overlay
+// and unified touch/gesture handling (SDL finger events + mouse-drag parity).
 // Renders entirely through Dear ImGui's ImDrawList on top of the SDL2 renderer.
 class WmcUi {
 public:
@@ -99,22 +134,30 @@ public:
     void present();
 
     // --- Hub ---
-    // `recent` and `browse` are the two card rows; `browse_path` is the folder
-    // currently shown in the Browse strip. Mutates selection indices and
-    // returns any navigation intent for main() to act on.
-    WmcInput render_hub(HubMode& strip,
+    // Vertical categories + horizontal tile strip. Mutates selection indices
+    // and returns any navigation intent for main() to act on. `loading` speeds
+    // up the spinning UMD logo (ISO read in progress). The live video texture
+    // feeds the mini "Now Playing" PIP.
+    WmcInput render_hub(SDL_Texture* video_tex, int video_w, int video_h,
                         const std::vector<DiscItem>& recent, int& recent_sel,
                         const std::vector<BrowseEntry>& browse, int& browse_sel,
                         const std::string& browse_path,
+                        HubMode& category,
                         int& action_sel, bool& extras_open, int& extras_sel,
                         int& setting_sel,
+                        const NowPlaying& now_playing, bool loading,
                         bool fullscreen, float volume, bool muted, float t);
 
     // --- Player ---
+    // `settings_open` is toggled by the gear button / O / Tab. `mi` feeds the
+    // Settings "Media Info" readout. Playback never stops while the overlay is up.
     WmcInput render_player(SDL_Texture* video_tex, int video_w, int video_h,
                            const DiscItem& disc, const std::string& stream_name,
                            bool paused, double elapsed, double total,
-                           bool& osd_visible, float volume, bool muted,
+                           bool& osd_visible, bool& settings_open,
+                           int& setting_sel, aspect::Mode aspect_mode,
+                           const PlayerMediaInfo& mi,
+                           float volume, bool muted,
                            bool fullscreen, float t);
 
     SDL_Texture* texture_from_png(const std::vector<uint8_t>& bytes,
@@ -123,26 +166,53 @@ public:
     bool initialized() const { return m_initialized; }
 
 private:
-    void draw_background(ImDrawList* dl, float w, float h, float t, SDL_Texture* pic1);
-    void draw_card(ImDrawList* dl, const DiscItem& disc, float cx, float cy,
+    void draw_aurora(ImDrawList* dl, float w, float h, float t, SDL_Texture* pic1);
+    void draw_umd_logo(ImDrawList* dl, float cx, float cy, float r, float t,
+                       bool loading);
+    void draw_clock(ImDrawList* dl, float w, float h);
+    void draw_tile(ImDrawList* dl, const DiscItem& disc, float cx, float cy,
                    float w, float h, float focus, bool selected, float t);
-    void draw_strip_tabs(ImDrawList* dl, float w, float y, HubMode strip, float t);
+    void draw_browse_tile(ImDrawList* dl, const BrowseEntry& e, float cx, float cy,
+                          float w, float h, float focus, bool selected, float t);
+    void draw_category_list(ImDrawList* dl, float x, float y, HubMode cat,
+                            bool has_now_playing, float t);
     void draw_action_panel(ImDrawList* dl, float x, float y, float w,
                            const DiscItem& disc, int action_sel, bool extras_open,
                            int extras_sel, int bonus_count);
     void draw_browse_panel(ImDrawList* dl, float x, float y, float w,
                            const std::string& path,
                            const std::vector<BrowseEntry>& entries,
-                           int browse_sel, float scroll);
+                           int browse_sel);
     void draw_settings_panel(ImDrawList* dl, float x, float y, float w,
                              int setting_sel, bool fullscreen, float volume,
                              bool muted);
+    void draw_now_playing_pip(ImDrawList* dl, float w, float h,
+                              const NowPlaying& np, SDL_Texture* video_tex,
+                              int video_w, int video_h, float t);
+    void draw_hub_transport(ImDrawList* dl, float w, float h, bool paused,
+                            float t, WmcInput& out);
     void draw_footer(ImDrawList* dl, float w, float h, const std::string& hint);
-    // Returns true when the pointer is over the transport bar (so the caller can
-    // keep the OSD pinned open).
+    // Glossy player transport + timeline. Returns true while the pointer is over
+    // the bar (so the caller keeps the OSD pinned open).
     bool draw_osd(ImDrawList* dl, float w, float h, float alpha,
                   bool paused, double elapsed, double total,
-                  float volume, bool muted, bool fullscreen, WmcInput& out);
+                  float volume, bool muted, bool fullscreen,
+                  bool settings_open, bool& gear_clicked, WmcInput& out);
+    // Translucent Settings overlay (does not stop playback).
+    void draw_settings_overlay(ImDrawList* dl, float w, float h, float alpha,
+                               int setting_sel, aspect::Mode aspect_mode,
+                               const PlayerMediaInfo& mi, float volume,
+                               bool muted, bool fullscreen, WmcInput& out);
+
+    // Gesture plumbing -------------------------------------------------------
+    // Touch and mouse samples are queued (with their own timestamps, both in
+    // the SDL_GetTicks base) and drained into the recognizer during render, so
+    // the two input paths share one time base.
+    struct PointerSample { int kind; float x, y; double t; bool mouse; };  // 0=down 1=move 2=up
+    void feed_finger(const SDL_Event& e);   // SDL_FINGER* -> sample queue
+    void feed_mouse();                      // mouse-drag parity (desktop)
+    void collect_gestures(bool allow_taps, std::vector<gesture::Event>& out);
+    void draw_player_huds(ImDrawList* dl, float w, float h, float alpha);
 
     SDL_Window*   m_window = nullptr;
     SDL_Renderer* m_renderer = nullptr;
@@ -153,13 +223,27 @@ private:
     ImFont* m_font_huge  = nullptr;
     ImFont* m_font_body  = nullptr;
 
-    float  m_scroll = 0.0f;         // lerped carousel position
+    float  m_tile_scroll = 0.0f;    // lerped (rendered) horizontal tile position
+    float  m_tile_pos    = 0.0f;    // authoritative carousel position (float index)
+    float  m_scroll_vel  = 0.0f;    // inertia velocity after a swipe (indices/s)
     float  m_osd_alpha = 0.0f;
     double m_last_input_time = 0.0;
     bool   m_seeking = false;       // timeline scrub in progress
     float  m_seek_preview = 0.0f;   // scrub position (0..1) while dragging
     HubMode m_last_strip = HubMode::Recent;
-    int    m_focus = 0;             // 0 = card row, 1 = action row
-    float  m_browse_scroll = 0.0f;
-    int    m_browse_cursor = 0;     // cursor row inside the file list
+    int    m_focus = 0;             // 0 = categories, 1 = tiles, 2 = panel
+    int    m_browse_cursor = 0;
+    float  m_logo_spin = 0.0f;      // UMD logo rotation (radians)
+
+    // Player gesture HUD state.
+    gesture::Recognizer m_gesture;
+    std::vector<PointerSample> m_ptr_queue;        // pending touch/mouse samples
+    std::vector<gesture::Event> m_gesture_queue;   // events awaiting render
+    bool   m_touch_active = false;                 // a finger is down
+    float  m_scrub_hud = 0.0f;      // >0 while the seek HUD is visible
+    double m_scrub_target = 0.0;    // target time shown by the seek HUD
+    float  m_vol_hud = 0.0f;        // >0 while the volume HUD is visible
+    float  m_dt_hud = 0.0f;         // >0 while the double-tap indicator is up
+    float  m_dt_delta = 0.0f;       // -10 or +10 for the double-tap indicator
+    bool   m_mouse_gesture = false; // a mouse drag is feeding the recognizer
 };

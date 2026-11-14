@@ -34,6 +34,8 @@ struct Options {
     bool        fullscreen    = false;   // --fullscreen: start in fullscreen
     std::string start_strip;             // --strip recent|browse|settings
     bool        demo_player   = false;   // --demo-player: render the OSD, no ISO
+    bool        open_settings = false;   // --open-settings: open the Settings overlay
+    std::string aspect_name;             // --aspect auto|16:9|4:3|fill
 };
 
 void print_usage() {
@@ -48,7 +50,9 @@ void print_usage() {
         "  --strip <name>         start on a hub strip: recent|browse|settings\n"
         "  --probe                print stream/metadata info and exit\n"
         "  --demo                 render the hub with synthetic data (no ISO)\n"
-        "  --demo-player          render the player OSD with synthetic data (no ISO)\n";
+        "  --demo-player          render the player OSD with synthetic data (no ISO)\n"
+        "  --open-settings        open the in-player Settings overlay (with --demo-player)\n"
+        "  --aspect <mode>        Zoom mode: auto|16:9|4:3|fill\n";
 }
 
 bool parse_args(int argc, char** argv, Options& opt) {
@@ -75,6 +79,10 @@ bool parse_args(int argc, char** argv, Options& opt) {
             opt.fullscreen = true;
         } else if (a == "--strip" && i + 1 < argc) {
             opt.start_strip = argv[++i];
+        } else if (a == "--open-settings") {
+            opt.open_settings = true;
+        } else if (a == "--aspect" && i + 1 < argc) {
+            opt.aspect_name = argv[++i];
         } else if (a == "-h" || a == "--help") {
             print_usage();
             return false;
@@ -227,24 +235,37 @@ int main(int argc, char** argv) {
     bool has_active = false;
 
     if (opt.demo) {
-        DiscItem d;
-        d.title    = "\u30c7\u30e2 UMD Video (Demo)";
-        d.disc_id  = "UMDPLAY-DEMO";
-        d.category = "UMD_VIDEO";
-        d.is_demo  = true;
+        // A handful of synthetic discs so the cross-axis carousel has something
+        // to scroll through (titles deliberately mix Latin + Japanese so the CJK
+        // glyph range gets exercised).
+        struct DemoDisc { const char* title; const char* id; const char* cat; };
+        const DemoDisc discs[] = {
+            {"Demo UMD Video \u30c7\u30e2", "UMDPLAY-DEMO", "UMD_VIDEO"},
+            {"Spider-Man 2",                "UMDS-00021",   "UMD_VIDEO"},
+            {"Final Fantasy VII \u30a2\u30c9\u30d9\u30f3\u30c8", "UCJS-10001", "UMD_VIDEO"},
+            {"Hitchhiker's Guide",          "UMDG-00007",   "UMD_VIDEO"},
+            {"Cowboy Bebop \u30bb\u30c3\u30b7\u30e7\u30f3", "UMDA-00033", "UMD_AUDIO"},
+        };
         const char* names[] = {"00001.MPS", "00002.MPS", "00003.MPS"};
         const uint32_t sizes[] = {1500000000u, 4000000u, 1200000u};
-        for (int i = 0; i < 3; ++i) {
-            StreamItem s;
-            s.name = names[i];
-            s.size_bytes = sizes[i];
-            s.is_main = (i == 0);
-            d.streams.push_back(s);
+        for (const auto& dd : discs) {
+            DiscItem d;
+            d.title    = dd.title;
+            d.disc_id  = dd.id;
+            d.category = dd.cat;
+            d.is_demo  = true;
+            for (int i = 0; i < 3; ++i) {
+                StreamItem s;
+                s.name = names[i];
+                s.size_bytes = sizes[i];
+                s.is_main = (i == 0);
+                d.streams.push_back(s);
+            }
+            LibraryItem it;
+            it.disc = d;
+            recent_items.push_back(it);
         }
-        LibraryItem it;
-        it.disc = d;
-        recent_items.push_back(it);
-        active = it;
+        active = recent_items.front();
         has_active = true;
     } else {
         // Restore previously opened discs from the recent list.
@@ -376,6 +397,12 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> audio_pcm;
     bool paused = false;
     bool osd_visible = true;
+    bool settings_open = opt.open_settings;
+    aspect::Mode aspect_mode = aspect::Mode::Auto;
+    if (opt.aspect_name == "16:9" || opt.aspect_name == "16x9") aspect_mode = aspect::Mode::R16x9;
+    else if (opt.aspect_name == "4:3" || opt.aspect_name == "4x3") aspect_mode = aspect::Mode::R4x3;
+    else if (opt.aspect_name == "fill") aspect_mode = aspect::Mode::Fill;
+    NowPlaying now_playing;   // hub PIP summary while a stream is loaded
     double elapsed = 0.0, total = 0.0;
     double fps = 29.97;
     uint32_t frame_delay_ms = 33;
@@ -495,6 +522,39 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Advance one playback tick: decode the next video frame / audio chunk,
+    // update the video texture and clock. Runs in both Hub and Player modes so
+    // the hub's Now Playing PIP keeps showing live video. Returns false when the
+    // stream ended (the caller drops back to the Hub).
+    auto advance_frame = [&]() -> bool {
+        if (opt.demo_player) {
+            ui.update_demo_texture(demo_yuv.data(), 720, 480);
+            return true;
+        }
+        if (!decoder_open || paused) { SDL_Delay(decoder_open ? 8 : 0); return true; }
+
+        FrameType ft = decoder.read_frame(video_frame, audio_pcm);
+        if (ft == FrameType::Eof) {
+            std::cout << "[*] Reached End of Stream.\n";
+            close_decoder();
+            ui.clear_audio_queue();
+            ui.pause_audio(false);
+            return false;
+        }
+        if (ft == FrameType::Video) {
+            ui.update_video_texture(video_frame);
+            elapsed = decoder.current_time();
+            const uint32_t cur = SDL_GetTicks();
+            const uint32_t e = cur - last_frame_time;
+            if (e < frame_delay_ms) SDL_Delay(frame_delay_ms - e);
+            last_frame_time = SDL_GetTicks();
+        } else if (ft == FrameType::Audio) {
+            if (!audio_pcm.empty())
+                ui.queue_audio(audio_pcm.data(), static_cast<uint32_t>(audio_pcm.size()));
+        }
+        return true;
+    };
+
     while (!quit) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
@@ -525,9 +585,21 @@ int main(int argc, char** argv) {
         WmcInput in;
 
         if (mode == Mode::Hub) {
-            in = wmc.render_hub(strip, recent_cards, recent_sel,
+            now_playing.active = decoder_open;
+            now_playing.paused = paused;
+            now_playing.elapsed = elapsed;
+            now_playing.total = total;
+            if (has_active) {
+                now_playing.title = active.disc.title;
+                if (play_stream_index >= 0 &&
+                    play_stream_index < static_cast<int>(active.disc.streams.size()))
+                    now_playing.stream = active.disc.streams[play_stream_index].name;
+            }
+            in = wmc.render_hub(ui.video_texture(), ui.video_width(), ui.video_height(),
+                                recent_cards, recent_sel,
                                 browse_entries, browse_sel, browse_dir,
-                                action_sel, extras_open, extras_sel, setting_sel,
+                                strip, action_sel, extras_open, extras_sel, setting_sel,
+                                now_playing, /*loading=*/false,
                                 ui.is_fullscreen(), ui.volume(), ui.muted(), now());
 
             switch (in.action) {
@@ -543,6 +615,10 @@ int main(int argc, char** argv) {
                     browse_dir = parent_dir(browse_dir);
                     build_browse(browse_dir, browse_entries);
                     browse_sel = 0;
+                    break;
+                case WmcAction::BackToPlayback:
+                    // Resume fullscreen playback from the hub's Now Playing PIP.
+                    if (decoder_open) { mode = Mode::Player; osd_visible = true; }
                     break;
                 case WmcAction::Play: {
                     const int idx = main_stream_index();
@@ -572,81 +648,85 @@ int main(int argc, char** argv) {
                     break;
                 default: break;
             }
+            // Keep the stream advancing in the background so the hub's Now
+            // Playing PIP shows live video (and audio stays in sync).
+            if (decoder_open) advance_frame();
         } else {
-            if (opt.demo_player) {
-                ui.update_demo_texture(demo_yuv.data(), 720, 480);
-            } else if (!paused) {
-                FrameType ft = decoder.read_frame(video_frame, audio_pcm);
-                if (ft == FrameType::Eof) {
-                    std::cout << "[*] Reached End of Stream.\n";
-                    mode = Mode::Hub;
-                    close_decoder();
-                    ui.clear_audio_queue();
-                    ui.pause_audio(false);
-                } else if (ft == FrameType::Video) {
-                    ui.update_video_texture(video_frame);
-                    elapsed = decoder.current_time();
-                    const uint32_t cur = SDL_GetTicks();
-                    const uint32_t e = cur - last_frame_time;
-                    if (e < frame_delay_ms) SDL_Delay(frame_delay_ms - e);
-                    last_frame_time = SDL_GetTicks();
-                } else if (ft == FrameType::Audio) {
-                    if (!audio_pcm.empty()) {
-                        ui.queue_audio(audio_pcm.data(),
-                                       static_cast<uint32_t>(audio_pcm.size()));
+            if (!advance_frame()) mode = Mode::Hub;
+
+            if (mode == Mode::Player) {
+                const std::string sname =
+                    (play_stream_index >= 0 &&
+                     play_stream_index < static_cast<int>(active.disc.streams.size()))
+                        ? active.disc.streams[play_stream_index].name
+                        : std::string("stream");
+
+                PlayerMediaInfo mi;
+                mi.sfo_title    = active.disc.title;
+                mi.video_codec  = decoder.video_codec_name();
+                mi.video_w      = ui.video_width();
+                mi.video_h      = ui.video_height();
+                mi.fps          = fps;
+                mi.par          = decoder.video_par();
+                mi.stride       = decoder.audio_stride();
+                mi.psmf_audio   = decoder.using_psmf_audio();
+                mi.sample_rate  = decoder.audio_sample_rate();
+                mi.deinterlace  = decoder.deinterlace_enabled();
+                mi.interlaced   = decoder.last_frame_interlaced();
+
+                in = wmc.render_player(ui.video_texture(), ui.video_width(), ui.video_height(),
+                                       active.disc, sname, paused, elapsed, total, osd_visible,
+                                       settings_open, setting_sel, aspect_mode, mi,
+                                       ui.volume(), ui.muted(), ui.is_fullscreen(), now());
+
+                switch (in.action) {
+                    case WmcAction::TogglePause:
+                        paused = !paused;
+                        ui.pause_audio(paused);
+                        break;
+                    case WmcAction::SeekRelative:
+                    case WmcAction::SeekBackward:
+                    case WmcAction::SeekForward: {
+                        const double delta = (in.action == WmcAction::SeekRelative)
+                                                 ? in.seek_delta
+                                                 : (in.action == WmcAction::SeekBackward ? -10.0 : 10.0);
+                        decoder.seek_absolute(elapsed + delta);
+                        elapsed = decoder.current_time();
+                        ui.clear_audio_queue();   // drop stale audio from the old position
+                        break;
                     }
+                    case WmcAction::SeekTo:
+                        decoder.seek_absolute(in.seek_seconds);
+                        elapsed = decoder.current_time();
+                        ui.clear_audio_queue();
+                        break;
+                    case WmcAction::ToggleDeinterlace:
+                        decoder.set_deinterlace(!decoder.deinterlace_enabled());
+                        break;
+                    case WmcAction::SetAspect:
+                        aspect_mode = in.aspect_mode;
+                        break;
+                    case WmcAction::VolumeChanged:
+                        ui.set_volume(in.volume);
+                        break;
+                    case WmcAction::MuteToggled:
+                        ui.set_muted(!ui.muted());
+                        break;
+                    case WmcAction::ToggleFullscreen:
+                        ui.toggle_fullscreen();
+                        break;
+                    case WmcAction::Stop:
+                        // Stop decoding but stay in the Player with the frame
+                        // frozen; Esc / the HUB button return to the Hub.
+                        close_decoder();
+                        ui.clear_audio_queue();
+                        ui.pause_audio(false);
+                        break;
+                    case WmcAction::BackToHub:
+                        mode = Mode::Hub;
+                        break;
+                    default: break;
                 }
-            } else {
-                SDL_Delay(10);
-            }
-
-            const std::string sname =
-                (play_stream_index >= 0 &&
-                 play_stream_index < static_cast<int>(active.disc.streams.size()))
-                    ? active.disc.streams[play_stream_index].name
-                    : std::string("stream");
-            in = wmc.render_player(ui.video_texture(), ui.video_width(), ui.video_height(),
-                                   active.disc, sname, paused, elapsed, total, osd_visible,
-                                   ui.volume(), ui.muted(), ui.is_fullscreen(), now());
-
-            switch (in.action) {
-                case WmcAction::TogglePause:
-                    paused = !paused;
-                    ui.pause_audio(paused);
-                    break;
-                case WmcAction::SeekRelative:
-                case WmcAction::SeekBackward:
-                case WmcAction::SeekForward: {
-                    const double delta = (in.action == WmcAction::SeekRelative)
-                                             ? in.seek_delta
-                                             : (in.action == WmcAction::SeekBackward ? -10.0 : 10.0);
-                    decoder.seek_absolute(elapsed + delta);
-                    elapsed = decoder.current_time();
-                    ui.clear_audio_queue();   // drop stale audio from the old position
-                    break;
-                }
-                case WmcAction::SeekTo:
-                    decoder.seek_absolute(in.seek_seconds);
-                    elapsed = decoder.current_time();
-                    ui.clear_audio_queue();
-                    break;
-                case WmcAction::VolumeChanged:
-                    ui.set_volume(in.volume);
-                    break;
-                case WmcAction::MuteToggled:
-                    ui.set_muted(!ui.muted());
-                    break;
-                case WmcAction::ToggleFullscreen:
-                    ui.toggle_fullscreen();
-                    break;
-                case WmcAction::Stop:
-                case WmcAction::BackToHub:
-                    mode = Mode::Hub;
-                    close_decoder();
-                    ui.clear_audio_queue();
-                    ui.pause_audio(false);
-                    break;
-                default: break;
             }
         }
 

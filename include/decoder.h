@@ -90,6 +90,32 @@ public:
         return m_video.codec_ctx ? m_video.codec_ctx->height : 0;
     }
 
+    // Pixel aspect ratio of the video (1.0 when square/unknown). Used by the
+    // player's Zoom modes so anamorphic 720x480 renders at its true shape.
+    float video_par() const {
+        if (!m_video.codec_ctx) return 1.0f;
+        const AVRational r = m_video.codec_ctx->sample_aspect_ratio;
+        if (r.num <= 0 || r.den <= 0) return 1.0f;
+        return static_cast<float>(r.num) / static_cast<float>(r.den);
+    }
+
+    // Human-readable video codec name ("h264", ...), or "" when unknown.
+    const char* video_codec_name() const {
+        return (m_video.codec_ctx && m_video.codec_ctx->codec &&
+                m_video.codec_ctx->codec->name)
+                   ? m_video.codec_ctx->codec->name
+                   : "";
+    }
+
+    // Detected ATRAC3+ frame stride in bytes (SONY_FRAME_STRIDE_DEFAULT when
+    // the stream uses the FFmpeg demuxer rather than the hand PSMF path).
+    size_t audio_stride() const { return m_psmf_stride; }
+    // True when audio is being demuxed by the hand PSMF (ATRAC3+) fallback.
+    bool using_psmf_audio() const { return m_psmf_audio; }
+    int  audio_sample_rate() const {
+        return m_audio.codec_ctx ? m_audio.codec_ctx->sample_rate : 0;
+    }
+
     // Total stream duration in seconds (0 if unknown).
     double get_duration() const;
 
