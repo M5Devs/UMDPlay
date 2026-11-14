@@ -47,7 +47,7 @@ public:
     bool seek_relative(double seconds);
 
     bool has_video() const { return m_video.stream_index != -1; }
-    bool has_audio() const { return m_audio.stream_index != -1; }
+    bool has_audio() const { return m_audio.stream_index != -1 || m_psmf_audio; }
     double get_fps() const { return m_fps; }
 
 private:
@@ -63,6 +63,21 @@ private:
 
     void process_audio_packet(AVPacket* pkt, AVFrame* audio_frame, std::vector<uint8_t>* out_pcm = nullptr);
 
+    // Sony PSMF ATRAC3+ fallback. FFmpeg's MPEG-PS demuxer does not expose the
+    // private stream 1 (0xBD) audio track, so when no audio stream is found the
+    // ATRAC3+ frames are demuxed by hand: 0xBD PES payloads are concatenated
+    // (frames span PES boundaries), split on the fixed 696-byte stride (8-byte
+    // Sony sync header + 688-byte frame) and the sync header is stripped.
+    bool init_psmf_audio();
+    bool psmf_read_more();
+    void process_psmf_audio(AVFrame* audio_frame, std::vector<uint8_t>& out_pcm, bool flush);
+    bool resample_to_s16(AVFrame* audio_frame, std::vector<uint8_t>& out_pcm);
+    void reset_psmf_audio(uint64_t scan_offset);
+
+    // Decode the next video frame from the FFmpeg demuxer, discarding packets
+    // that belong to no tracked stream. Used by the PSMF interleave path.
+    FrameType decode_video_frame(AVFrame* out);
+
     StreamIoState    m_io;
     uint8_t*         m_avio_buffer = nullptr;
     AVIOContext*     m_avio_ctx    = nullptr;
@@ -71,6 +86,21 @@ private:
     StreamInfo       m_video;
     StreamInfo       m_audio;
     std::vector<uint8_t> m_audio_buffer;
+
+    // PSMF ATRAC3+ fallback state
+    bool                 m_psmf_audio   = false;
+    bool                 m_psmf_eof     = false;
+    uint64_t             m_psmf_cursor  = 0;   // next MPEG-PS packet offset (relative to base)
+    std::vector<uint8_t> m_psmf_pes;           // buffered concatenated 0xBD payloads
+    size_t               m_psmf_pos     = 0;   // parse cursor inside m_psmf_pes
+    int64_t              m_psmf_samples = 0;   // PCM samples emitted so far
+    int64_t              m_vcount       = 0;   // video frames emitted (A/V pacing)
+    std::vector<uint8_t> m_psmf_scan;          // reusable read buffer
+    std::ifstream        m_psmf_file;
+    AVPacket*            m_psmf_pkt     = nullptr;
+    AVFrame*             m_psmf_video   = nullptr; // stashed frame for A/V interleave
+    bool                 m_psmf_video_pending = false;
+    std::string          m_iso_path;
 
     SwrContext*      m_swr_ctx     = nullptr;
     AVFrame*         m_temp_audio_frame = nullptr;

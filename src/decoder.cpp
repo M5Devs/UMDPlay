@@ -4,7 +4,12 @@
 #include <sstream>
 
 static constexpr size_t AVIO_BUF_SIZE = 64 * 1024;
+
+// Sony PSMF ATRAC3+ framing: each frame is prefixed by an 8-byte sync header and
+// the stride between consecutive frames is fixed at 696 bytes (688-byte payload).
 static const uint8_t SONY_FRAME_HEADER[8] = { 0x0F, 0xD0, 0x48, 0x55, 0x00, 0x00, 0x00, 0x00 };
+static constexpr size_t SONY_FRAME_STRIDE = 696;
+static constexpr size_t PSMF_CHUNK        = 4 * 1024 * 1024;  // read granularity for the 0xBD walk
 
 Decoder::Decoder() {}
 Decoder::~Decoder() { close(); }
@@ -59,6 +64,7 @@ int64_t Decoder::seek_packet(void* opaque, int64_t offset, int whence) {
 bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
     close();
 
+    m_iso_path = iso_path;
     m_io.iso_file.open(iso_path, std::ios::binary);
     if (!m_io.iso_file.is_open()) return false;
 
@@ -199,7 +205,231 @@ bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
     m_temp_audio_frame = av_frame_alloc();
     m_demux_pkt = av_packet_alloc();
 
-    return (m_video.stream_index != -1 || m_audio.stream_index != -1);
+    // FFmpeg's MPEG-PS demuxer does not surface the Sony private stream, so if
+    // no audio stream was detected fall back to hand-demuxing the ATRAC3+ track.
+    if (m_audio.stream_index == -1) {
+        init_psmf_audio();
+    }
+
+    return (m_video.stream_index != -1 || m_audio.stream_index != -1 || m_psmf_audio);
+}
+
+bool Decoder::init_psmf_audio() {
+    m_psmf_file.open(m_iso_path, std::ios::binary);
+    if (!m_psmf_file.is_open()) return false;
+
+    const AVCodec* audio_decoder = avcodec_find_decoder(AV_CODEC_ID_ATRAC3P);
+    if (!audio_decoder) return false;
+
+    m_audio.codec = audio_decoder;
+    m_audio.codec_ctx = avcodec_alloc_context3(audio_decoder);
+    m_audio.codec_ctx->sample_rate = 44100;
+    m_audio.codec_ctx->ch_layout = AV_CHANNEL_LAYOUT_STEREO;
+    m_audio.codec_ctx->block_align = static_cast<int>(SONY_FRAME_STRIDE);
+    m_audio.codec_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
+    if (avcodec_open2(m_audio.codec_ctx, audio_decoder, nullptr) < 0) {
+        avcodec_free_context(&m_audio.codec_ctx);
+        m_audio.codec = nullptr;
+        return false;
+    }
+
+    if (!m_swr_ctx) {
+        swr_alloc_set_opts2(
+            &m_swr_ctx,
+            &m_audio.codec_ctx->ch_layout, AV_SAMPLE_FMT_S16, 44100,
+            &m_audio.codec_ctx->ch_layout, m_audio.codec_ctx->sample_fmt, 44100,
+            0, nullptr);
+        if (m_swr_ctx) swr_init(m_swr_ctx);
+    }
+
+    m_psmf_pkt = av_packet_alloc();
+    m_psmf_video = av_frame_alloc();
+    m_psmf_audio = true;
+    m_psmf_eof = false;
+    m_psmf_cursor = 0;
+    m_psmf_pes.clear();
+    m_psmf_pos = 0;
+    m_psmf_samples = 0;
+    m_psmf_video_pending = false;
+    return true;
+}
+
+// Read forward from the PSMF cursor, walking MPEG-PS packets and appending the
+// payload of every private-stream-1 (0xBD) packet to m_psmf_pes. The MPEG-PS
+// pack/system headers are parsed generically so video packets are skipped.
+bool Decoder::psmf_read_more() {
+    if (m_psmf_eof) return false;
+    if (!m_psmf_file.is_open()) return false;
+
+    while (m_psmf_cursor < m_io.file_size) {
+        size_t want = static_cast<size_t>(
+            std::min<uint64_t>(PSMF_CHUNK, m_io.file_size - m_psmf_cursor));
+        m_psmf_scan.resize(want);
+        m_psmf_file.clear();
+        m_psmf_file.seekg(static_cast<std::streamoff>(m_io.base_offset + m_psmf_cursor),
+                          std::ios::beg);
+        m_psmf_file.read(reinterpret_cast<char*>(m_psmf_scan.data()),
+                         static_cast<std::streamsize>(want));
+        size_t got = static_cast<size_t>(m_psmf_file.gcount());
+        if (got == 0) { m_psmf_eof = true; return false; }
+
+        const uint8_t* d = m_psmf_scan.data();
+        size_t p = 0;
+        size_t last_end = 0;        // end offset of the last fully consumed packet
+        bool any_parsed = false;    // parsed >= 1 complete packet/pack header
+        bool consumed_something = false;
+
+        while (p + 6 <= got) {
+            // Locate the next start code.
+            size_t sc = p;
+            while (sc + 4 <= got && !(d[sc] == 0 && d[sc + 1] == 0 && d[sc + 2] == 1)) ++sc;
+            if (sc + 4 > got) break;
+
+            uint8_t sid = d[sc + 3];
+            if (sid == 0xBA) {  // MPEG-2 pack header (14 bytes)
+                p = sc + 14;
+                last_end = p;
+                any_parsed = true;
+                continue;
+            }
+            if (sid == 0xB9) { m_psmf_eof = true; break; }  // program end
+
+            if (sc + 6 > got) break;
+            uint16_t plen = static_cast<uint16_t>((d[sc + 4] << 8) | d[sc + 5]);
+            if (plen == 0) break;
+            size_t pes_end = sc + 6 + plen;
+            if (pes_end > got) break;  // packet spans the chunk boundary; stop here
+
+            if (sid == 0xBD) {
+                uint8_t hdrlen = d[sc + 8];
+                size_t data_off = sc + 9 + hdrlen + 4;  // skip PES opts + 4-byte substream hdr
+                if (data_off < pes_end) {
+                    m_psmf_pes.insert(m_psmf_pes.end(), d + data_off, d + pes_end);
+                    consumed_something = true;
+                }
+            }
+            p = pes_end;
+            last_end = p;
+            any_parsed = true;
+        }
+
+        if (any_parsed) {
+            m_psmf_cursor += last_end;
+            if (consumed_something) return true;
+            continue;  // only video/pack packets in this chunk; read the next one
+        }
+
+        // A packet straddles the chunk start (only possible at true EOF with a
+        // 4 MiB read window) or no start code was found: stop.
+        m_psmf_eof = true;
+        return false;
+    }
+    m_psmf_eof = true;
+    return false;
+}
+
+// Decode the next available ATRAC3+ frame into out_pcm (S16 stereo).
+void Decoder::process_psmf_audio(AVFrame* audio_frame, std::vector<uint8_t>& out_pcm, bool flush) {
+    if (!m_audio.codec_ctx) return;
+
+    while (true) {
+        // Ensure we have at least one full frame buffered.
+        while (m_psmf_pos + SONY_FRAME_STRIDE <= m_psmf_pes.size()) {
+            const uint8_t* unit = m_psmf_pes.data() + m_psmf_pos;
+            if (std::memcmp(unit, SONY_FRAME_HEADER, 8) != 0) {
+                // Lost sync: rescan for the next Sony header.
+                ++m_psmf_pos;
+                continue;
+            }
+            av_packet_unref(m_psmf_pkt);
+            m_psmf_pkt->data = const_cast<uint8_t*>(unit + 8);
+            m_psmf_pkt->size = static_cast<int>(SONY_FRAME_STRIDE - 8);
+            m_psmf_pos += SONY_FRAME_STRIDE;
+
+            if (avcodec_send_packet(m_audio.codec_ctx, m_psmf_pkt) < 0) continue;
+            bool got = false;
+            while (avcodec_receive_frame(m_audio.codec_ctx, audio_frame) >= 0) {
+                resample_to_s16(audio_frame, out_pcm);
+                m_psmf_samples += audio_frame->nb_samples;
+                got = true;
+            }
+            if (got) return;
+        }
+
+        if (flush) {
+            // Drain the decoder.
+            av_packet_unref(m_psmf_pkt);
+            m_psmf_pkt->data = nullptr;
+            m_psmf_pkt->size = 0;
+            if (avcodec_send_packet(m_audio.codec_ctx, m_psmf_pkt) >= 0) {
+                while (avcodec_receive_frame(m_audio.codec_ctx, audio_frame) >= 0) {
+                    resample_to_s16(audio_frame, out_pcm);
+                    m_psmf_samples += audio_frame->nb_samples;
+                }
+            }
+            return;
+        }
+
+        // Need more data: drop the parsed prefix and pull another chunk.
+        if (m_psmf_pos > 0) {
+            m_psmf_pes.erase(m_psmf_pes.begin(), m_psmf_pes.begin() + m_psmf_pos);
+            m_psmf_pos = 0;
+        }
+        if (!psmf_read_more()) {
+            flush = true;
+        }
+    }
+}
+
+bool Decoder::resample_to_s16(AVFrame* audio_frame, std::vector<uint8_t>& out_pcm) {
+    if (!m_swr_ctx || !audio_frame) return false;
+    int out_samples = audio_frame->nb_samples;
+    int dst_bufsize = av_samples_get_buffer_size(nullptr, 2, out_samples, AV_SAMPLE_FMT_S16, 0);
+    if (dst_bufsize <= 0) return false;
+
+    size_t orig = out_pcm.size();
+    out_pcm.resize(orig + static_cast<size_t>(dst_bufsize));
+    uint8_t* out_ptr = out_pcm.data() + orig;
+
+    const uint8_t* in_data[AV_NUM_DATA_POINTERS] = { nullptr };
+    for (int i = 0; i < AV_NUM_DATA_POINTERS; ++i) in_data[i] = audio_frame->data[i];
+
+    int converted = swr_convert(m_swr_ctx, &out_ptr, out_samples, in_data, audio_frame->nb_samples);
+    if (converted < 0) {
+        out_pcm.resize(orig);
+        return false;
+    }
+    out_pcm.resize(orig + static_cast<size_t>(converted) * 2 * sizeof(int16_t));
+    return true;
+}
+
+void Decoder::reset_psmf_audio(uint64_t scan_offset) {
+    m_psmf_cursor = scan_offset;
+    m_psmf_pes.clear();
+    m_psmf_pos = 0;
+    m_psmf_eof = false;
+    m_psmf_samples = 0;
+    m_psmf_video_pending = false;
+    if (m_audio.codec_ctx) avcodec_flush_buffers(m_audio.codec_ctx);
+}
+
+// Decode one video frame straight from the FFmpeg demuxer, skipping audio.
+FrameType Decoder::decode_video_frame(AVFrame* out) {
+    if (!m_video.codec_ctx || !out) return FrameType::Eof;
+    while (true) {
+        if (avcodec_receive_frame(m_video.codec_ctx, out) >= 0) return FrameType::Video;
+        int ret = av_read_frame(m_fmt_ctx, m_demux_pkt);
+        if (ret < 0) return FrameType::Eof;
+        if (m_video.stream_index != -1 && m_demux_pkt->stream_index == m_video.stream_index) {
+            int r = avcodec_send_packet(m_video.codec_ctx, m_demux_pkt);
+            av_packet_unref(m_demux_pkt);
+            if (r >= 0) {
+                if (avcodec_receive_frame(m_video.codec_ctx, out) >= 0) return FrameType::Video;
+            }
+        } else {
+            av_packet_unref(m_demux_pkt);
+        }
+    }
 }
 
 void Decoder::process_audio_packet(AVPacket* pkt, AVFrame* audio_frame, std::vector<uint8_t>* out_pcm) {
@@ -273,6 +503,33 @@ FrameType Decoder::read_frame(AVFrame* video_frame, std::vector<uint8_t>& audio_
 
     audio_pcm.clear();
 
+    // Hand-demuxed ATRAC3+ path: pace audio against the video frame clock so the
+    // caller receives interleaved Video/Audio events in roughly real time.
+    if (m_psmf_audio) {
+        if (!m_psmf_video_pending) {
+            if (decode_video_frame(m_psmf_video) != FrameType::Video) {
+                return FrameType::Eof;
+            }
+            m_psmf_video_pending = true;
+        }
+
+        const double fps = (m_fps > 0.0 && m_fps < 240.0) ? m_fps : 29.97;
+        const int64_t target = static_cast<int64_t>((m_vcount + 1) * (44100.0 / fps));
+        while (m_psmf_samples < target) {
+            process_psmf_audio(m_temp_audio_frame, audio_pcm, false);
+            if (audio_pcm.empty()) break;  // no more audio available
+        }
+        if (!audio_pcm.empty()) return FrameType::Audio;
+
+        if (video_frame) {
+            av_frame_unref(video_frame);
+            av_frame_ref(video_frame, m_psmf_video);
+        }
+        m_psmf_video_pending = false;
+        m_vcount++;
+        return FrameType::Video;
+    }
+
     while (true) {
         // First check if video codec context has any buffered frames available
         if (m_video.codec_ctx && video_frame) {
@@ -333,6 +590,14 @@ bool Decoder::seek_relative(double seconds) {
 
     if (m_avio_ctx) {
         avio_flush(m_avio_ctx);
+    }
+
+    if (m_psmf_audio) {
+        // Re-anchor the manual audio demuxer to the demuxer's new byte position.
+        int64_t pos = m_avio_ctx ? avio_tell(m_avio_ctx) : 0;
+        if (pos < 0) pos = 0;
+        reset_psmf_audio(static_cast<uint64_t>(pos));
+        m_vcount = 0;
     }
 
     return ret >= 0;
@@ -407,6 +672,17 @@ void Decoder::save_ppm(AVFrame* frame, int width, int height, const std::string&
 
 void Decoder::close() {
     m_audio_buffer.clear();
+    if (m_psmf_pkt) { av_packet_free(&m_psmf_pkt); }
+    if (m_psmf_video) { av_frame_free(&m_psmf_video); }
+    if (m_psmf_file.is_open()) m_psmf_file.close();
+    m_psmf_audio = false;
+    m_psmf_pes.clear();
+    m_psmf_scan.clear();
+    m_psmf_pos = 0;
+    m_psmf_cursor = 0;
+    m_psmf_samples = 0;
+    m_psmf_video_pending = false;
+    m_vcount = 0;
     if (m_swr_ctx) { swr_free(&m_swr_ctx); }
     if (m_temp_audio_frame) { av_frame_free(&m_temp_audio_frame); }
     if (m_demux_pkt) { av_packet_free(&m_demux_pkt); }
