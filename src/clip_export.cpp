@@ -80,6 +80,12 @@ bool export_clip(const std::string& iso_path,
         decoder.close();
         return false;
     }
+    std::cout << "[*] clip_export: video=" << decoder.video_codec_name()
+              << " " << vw << "x" << vh << " @" << fps << "fps, audio="
+              << (decoder.using_psmf_audio()
+                      ? "ATRAC3+ (hand-demuxed Sony PSMF 0xBD)"
+                      : "FFmpeg demuxer")
+              << " " << decoder.audio_sample_rate() << "Hz\n";
     if (start_seconds > 0.0) {
         std::cout << "[*] clip_export: seeking to " << start_seconds << "s\n";
         decoder.seek_absolute(start_seconds);

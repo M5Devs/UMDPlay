@@ -6,6 +6,8 @@
 #include "recent.h"
 #include "playlist_parser.h"
 #include "rco_parser.h"
+#include "rco_menu.h"
+#include "rco_texture.h"
 #include "vsmx_vm.h"
 
 #include "stb_image_write.h"   // declarations only (impl is in stb_impl.cpp)
@@ -23,7 +25,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-enum class Mode { Hub, Player };
+enum class Mode { Hub, Player, DiscMenu };
 
 struct Options {
     std::string iso_path;
@@ -39,6 +41,8 @@ struct Options {
     bool        demo_player   = false;   // --demo-player: render the OSD, no ISO
     bool        open_settings = false;   // --open-settings: open the Settings overlay
     bool        open_chapters = false;   // --open-chapters: open the Chapters panel
+    bool        open_menu     = false;   // --open-menu: open the .RCO Disc Menu
+    std::string menu_page;                // --menu-page <name>: start on a page
     std::string aspect_name;             // --aspect auto|16:9|4:3|fill
     bool        verbose = false;         // --verbose: full VSMX disassembly in --probe
 };
@@ -59,6 +63,8 @@ void print_usage() {
         "  --demo-player          render the player OSD with synthetic data (no ISO)\n"
         "  --open-settings        open the in-player Settings overlay (with --demo-player)\n"
         "  --open-chapters        open the Chapters panel (with --demo)\n"
+        "  --open-menu            open the interactive .RCO Disc Menu\n"
+        "  --menu-page <name>     start the Disc Menu on a named page\n"
         "  --aspect <mode>        Zoom mode: auto|16:9|4:3|fill\n";
 }
 
@@ -92,6 +98,10 @@ bool parse_args(int argc, char** argv, Options& opt) {
             opt.open_settings = true;
         } else if (a == "--open-chapters") {
             opt.open_chapters = true;
+        } else if (a == "--open-menu") {
+            opt.open_menu = true;
+        } else if (a == "--menu-page" && i + 1 < argc) {
+            opt.menu_page = argv[++i];
         } else if (a == "--aspect" && i + 1 < argc) {
             opt.aspect_name = argv[++i];
         } else if (a == "-h" || a == "--help") {
@@ -191,6 +201,10 @@ bool load_iso(const std::string& path, LibraryItem& out) {
     d.has_icon = reader.has_metadata("ICON0.PNG");
     d.has_pic1 = reader.has_metadata("PIC1.PNG");
     d.has_snd0 = reader.has_metadata("SND0.AT3");
+    for (const auto& a : reader.assets_in("RESOURCE")) {
+        if (a.name.size() >= 4 &&
+            a.name.compare(a.name.size() - 4, 4, ".RCO") == 0) { d.has_menu = true; break; }
+    }
 
     uint32_t max_size = 0;
     for (const auto& e : entries) max_size = std::max(max_size, e.size_bytes);
@@ -559,6 +573,41 @@ int main(int argc, char** argv) {
     int shot_countdown = -1;
     int play_stream_index = 0;
 
+    // --- Disc Menu state (interactive .RCO page navigation) ---
+    umdplay::RcoMenu disc_menu;
+    umdplay::RcoTextureCache menu_tex;
+    bool disc_menu_open = false;
+    auto open_disc_menu = [&]() -> bool {
+        if (!has_active || !active.disc.has_menu || active.disc.iso_path.empty())
+            return false;
+        IsoReader reader(active.disc.iso_path);
+        if (!reader.open()) return false;
+        std::vector<uint8_t> best;
+        std::string best_name;
+        for (const auto& a : reader.assets_in("RESOURCE")) {
+            if (a.name.size() < 4) continue;
+            std::string ext = a.name.substr(a.name.size() - 4);
+            for (char& ch : ext) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            if (ext != ".RCO") continue;
+            auto raw = reader.read_asset(a);
+            if (raw.size() > best.size()) { best = std::move(raw); best_name = a.name; }
+        }
+        if (best.empty()) return false;
+        auto rco = umdplay::parse_rco(best.data(), best.size());
+        const int seed_ch = std::max(1, current_chapter(active.disc, elapsed) + 1);
+        if (!disc_menu.build(rco, 3, seed_ch)) {
+            std::cerr << "[-] Disc Menu: " << best_name << " has no usable VSMX menu\n";
+            return false;
+        }
+        menu_tex.build(ui.renderer(), rco, best.data(), best.size());
+        disc_menu_open = true;
+        std::cout << "[*] Disc Menu: " << best_name << " - page '"
+                  << disc_menu.page_name() << "' (" << disc_menu.page_count()
+                  << " pages, " << disc_menu.page().items.size() << " items, "
+                  << menu_tex.count() << " textures)\n";
+        return true;
+    };
+
     // --demo-player: show the transport OSD with a synthetic video texture and
     // a fake clock so the OSD can be rendered (and screenshotted) with no ISO.
     std::vector<uint8_t> demo_yuv;
@@ -662,6 +711,15 @@ int main(int argc, char** argv) {
         strip = HubMode::Recent;
     };
 
+    // --open-menu: jump straight into the Disc Menu (used for screenshots).
+    if (opt.open_menu && has_active && !opt.demo) {
+        if (open_disc_menu()) {
+            if (!opt.menu_page.empty() && !disc_menu.goto_page(opt.menu_page))
+                std::cerr << "[-] Disc Menu: no page named '" << opt.menu_page << "'\n";
+            mode = Mode::DiscMenu;
+        }
+    }
+
     if (opt.autoplay && has_active) {
         const int idx = main_stream_index();
         if (open_stream(idx)) {
@@ -713,6 +771,15 @@ int main(int argc, char** argv) {
                 const bool alt = (ev.key.keysym.mod & KMOD_ALT) != 0;
                 if (k == SDLK_q && mode == Mode::Hub) quit = true;
                 if (k == SDLK_F11 || (k == SDLK_RETURN && alt)) ui.toggle_fullscreen();
+                // Disc Menu entry: "T" (top menu) in the Hub/Player, or the
+                // disc's own Menu button. "M"/"m" stays the player's mute
+                // toggle, and ESC inside the menu is handled by the menu itself
+                // (step back a page, or leave at the top level).
+                if (k == SDLK_t && mode != Mode::DiscMenu &&
+                    active.disc.has_menu && !opt.demo) {
+                    open_disc_menu();
+                    mode = Mode::DiscMenu;
+                }
             }
             if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
                 switch (ev.cbutton.button) {
@@ -817,6 +884,39 @@ int main(int argc, char** argv) {
             // Keep the stream advancing in the background so the hub's Now
             // Playing PIP shows live video (and audio stays in sync).
             if (decoder_open) advance_frame();
+        } else if (mode == Mode::DiscMenu) {
+            DiscMenuResult dr = wmc.render_disc_menu(disc_menu, menu_tex,
+                                                     active.disc, now());
+            if (dr.close) mode = decoder_open ? Mode::Player : Mode::Hub;
+            if (dr.action.kind != umdplay::MenuActionKind::None) {
+                switch (dr.action.kind) {
+                    case umdplay::MenuActionKind::PlayMovie: {
+                        std::cout << "[*] Disc Menu -> play";
+                        if (dr.action.chapter > 0)
+                            std::cout << " chapter " << dr.action.chapter;
+                        std::cout << "\n";
+                        const int idx = main_stream_index();
+                        if (open_stream(idx)) {
+                            if (dr.action.chapter > 0 &&
+                                dr.action.chapter <= static_cast<int>(active.disc.chapters.size())) {
+                                const double target = active.disc.chapters[dr.action.chapter - 1].seconds;
+                                decoder.seek_absolute(target);
+                                elapsed = decoder.current_time();
+                                ui.clear_audio_queue();
+                            }
+                            mode = Mode::Player; paused = false; osd_visible = true;
+                        }
+                        break;
+                    }
+                    case umdplay::MenuActionKind::BackToPlayer:
+                        mode = Mode::Player;
+                        break;
+                    case umdplay::MenuActionKind::ExitMenu:
+                        mode = decoder_open ? Mode::Player : Mode::Hub;
+                        break;
+                    default: break;
+                }
+            }
         } else {
             if (!advance_frame()) mode = Mode::Hub;
 
@@ -844,10 +944,12 @@ int main(int argc, char** argv) {
                 if (mi.chapter >= 0)
                     mi.chapter_label = active.disc.chapters[mi.chapter].label;
 
+                bool menu_clicked = false;
                 in = wmc.render_player(ui.video_texture(), ui.video_width(), ui.video_height(),
                                        active.disc, sname, paused, elapsed, total, osd_visible,
                                        settings_open, setting_sel, aspect_mode, mi,
-                                       ui.volume(), ui.muted(), ui.is_fullscreen(), now());
+                                       ui.volume(), ui.muted(), ui.is_fullscreen(),
+                                       active.disc.has_menu && !opt.demo, menu_clicked, now());
 
                 switch (in.action) {
                     case WmcAction::TogglePause:
@@ -910,6 +1012,9 @@ int main(int argc, char** argv) {
                         break;
                     case WmcAction::BackToHub:
                         mode = Mode::Hub;
+                        break;
+                    case WmcAction::OpenDiscMenu:
+                        if (open_disc_menu()) mode = Mode::DiscMenu;
                         break;
                     default: break;
                 }

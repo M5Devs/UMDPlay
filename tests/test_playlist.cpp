@@ -10,6 +10,7 @@
 #include "iso_reader.h"
 #include "playlist_parser.h"
 #include "rco_parser.h"
+#include "rco_menu.h"
 #include "vsmx_vm.h"
 
 #include <cstdint>
@@ -406,6 +407,19 @@ void test_chapter_nav() {
     CHECK(umdplay::chapter_step(ch, 45.0, -1, 60.0) == 0);
 }
 
+// --- Disc Menu model -----------------------------------------------------
+
+void test_rco_menu_synthetic() {
+    // The synthetic .RCO builder above is fiddly and the real-disc case below
+    // covers the model end-to-end, so here we only assert the model degrades
+    // gracefully on an RCO with no usable VSMX.
+    std::vector<uint8_t> junk(64, 0);
+    auto r = umdplay::parse_rco(junk.data(), junk.size());
+    umdplay::RcoMenu menu;
+    CHECK(!menu.build(r));
+    CHECK(!menu.valid());
+}
+
 // --- real disc (when present) --------------------------------------------
 
 void test_real_disc() {
@@ -528,6 +542,63 @@ void test_real_disc() {
             std::printf("[*] VSMX onAutoPlay ran: controller=%zu movieplayer=%zu host calls\n",
                         ctrl->calls.size(), movie->calls.size());
         }
+
+        // The Disc Menu model drives the same RCO through its VSMX script:
+        // build it, walk the pages, and confirm a button press produces a
+        // concrete MenuAction (page switch or playback) rather than nothing.
+        umdplay::RcoMenu menu;
+        CHECK(menu.build(r, 3, 1));
+        if (menu.valid()) {
+            CHECK(menu.page_count() >= 1);
+            CHECK(!menu.page_name().empty());
+            std::printf("[*] Disc Menu model: %d pages, page '%s' (%zu items, "
+                        "%d buttons)\n", menu.page_count(),
+                        menu.page_name().c_str(), menu.page().items.size(),
+                        menu.focus_index() >= 0 ? 1 : 0);
+            CHECK(menu.focused_item() != nullptr);
+
+            // The main_menu page carries a "main2" tile whose push handler
+            // sets pageID=2; activating it must switch to the chapter page.
+            const std::string first_page = menu.page_name();
+            const umdplay::RcoMenuItem* main2 = nullptr;
+            for (const auto& it : menu.page().items)
+                if (it.is_button && it.name == "main2") main2 = &it;
+            if (main2) {
+                menu.focus_at(main2->rect_x + main2->rect_w * 0.5f,
+                              main2->rect_y + main2->rect_h * 0.5f);
+                umdplay::MenuAction a = menu.activate_focused();
+                CHECK(a.kind == umdplay::MenuActionKind::SwitchPage);
+                CHECK(menu.page_name() != first_page);
+                std::printf("[*] Disc Menu: '%s' -> '%s' via main2\n",
+                            first_page.c_str(), menu.page_name().c_str());
+
+                // On the chapter page, a chapter tile yields a play request.
+                const umdplay::RcoMenuItem* chap = nullptr;
+                for (const auto& it : menu.page().items)
+                    if (it.is_button && it.name.rfind("chapter", 0) == 0 &&
+                        it.name.find("_") == std::string::npos) { chap = &it; break; }
+                if (chap) {
+                    menu.focus_at(chap->rect_x + chap->rect_w * 0.5f,
+                                  chap->rect_y + chap->rect_h * 0.5f);
+                    umdplay::MenuAction b = menu.activate_focused();
+                    CHECK(b.kind == umdplay::MenuActionKind::PlayMovie);
+                    std::printf("[*] Disc Menu: chapter tile '%s' -> play (chapter %d)\n",
+                                chap->name.c_str(), b.chapter);
+                }
+            }
+
+            // Navigation always lands on a real button (or none, never a bad
+            // index), and the page stays one of the RCO's own pages.
+            menu.move_focus(0, 1);
+            const int fi = menu.focus_index();
+            CHECK(fi == -1 || menu.focused_item() != nullptr);
+            bool known_page = false;
+            for (uint32_t p : r.pages()) {
+                const auto* po = r.object(p);
+                if (po && po->name == menu.page_name()) known_page = true;
+            }
+            CHECK(known_page);
+        }
     }
 }
 
@@ -538,6 +609,7 @@ int main() {
     test_playlist_rejects();
     test_rco_synthetic();
     test_vsmx_synthetic();
+    test_rco_menu_synthetic();
     test_chapter_nav();
     test_real_disc();
 

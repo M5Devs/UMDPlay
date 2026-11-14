@@ -7,6 +7,8 @@
 
 #include "aspect.h"
 #include "gesture.h"
+#include "rco_menu.h"
+#include "rco_texture.h"
 
 struct ImFont;
 struct ImDrawList;
@@ -42,6 +44,7 @@ struct DiscItem {
     bool has_icon = false;                     // ICON0.PNG
     bool has_pic1 = false;                     // PIC1.PNG
     bool has_snd0 = false;                     // SND0.AT3
+    bool has_menu = false;                     // a RESOURCE/*.RCO menu is present
 
     bool is_demo = false;                      // synthetic entry (--demo)
 };
@@ -53,6 +56,12 @@ enum class HubMode {
     Browse,       // the Browse System (folder/file) category
     Settings,     // the Options category
     NowPlaying    // jump back into playback (only while a stream is open)
+};
+
+// What the Disc Menu screen asks main() to do after an interaction.
+struct DiscMenuResult {
+    umdplay::MenuAction action;   // from a button press (may be None)
+    bool close = false;           // leave the menu (Esc at the top level)
 };
 
 // One entry in the Browse System listing (a folder or a .iso file).
@@ -116,7 +125,8 @@ enum class WmcAction {
     ToggleDeinterlace,
     SetAspect,          // new zoom mode in `aspect_mode`
     VolumeChanged,      // new gain in `volume`
-    MuteToggled
+    MuteToggled,
+    OpenDiscMenu        // open the interactive .RCO Disc Menu
 };
 
 struct WmcInput {
@@ -175,8 +185,16 @@ public:
                            bool& osd_visible, bool& settings_open,
                            int& setting_sel, aspect::Mode aspect_mode,
                            const PlayerMediaInfo& mi,
-                           float volume, bool muted,
-                           bool fullscreen, float t);
+                           float volume, bool muted, bool fullscreen,
+                           bool has_menu, bool& menu_clicked, float t);
+
+    // Interactive Disc Menu screen: renders the active .RCO page from `menu`
+    // (blitting cached `tex` textures), drives keyboard/gamepad/mouse/touch
+    // navigation, and returns the resulting action. `disc` supplies the title
+    // for the header bar.
+    DiscMenuResult render_disc_menu(umdplay::RcoMenu& menu,
+                                    const umdplay::RcoTextureCache& tex,
+                                    const DiscItem& disc, float t);
 
     SDL_Texture* texture_from_png(const std::vector<uint8_t>& bytes,
                                   int* out_w = nullptr, int* out_h = nullptr);
@@ -221,7 +239,8 @@ private:
                   bool paused, double elapsed, double total,
                   float volume, bool muted, bool fullscreen,
                   bool settings_open, int chapter, int chapter_count,
-                  bool& gear_clicked, WmcInput& out);
+                  bool has_menu, bool& gear_clicked, bool& menu_clicked,
+                  WmcInput& out);
     // Translucent Settings overlay (does not stop playback).
     void draw_settings_overlay(ImDrawList* dl, float w, float h, float alpha,
                                int setting_sel, aspect::Mode aspect_mode,

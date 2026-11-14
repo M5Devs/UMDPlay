@@ -73,6 +73,7 @@ add_library(umdplay_core STATIC
     src/playlist_parser.cpp
     src/rco_parser.cpp
     src/vsmx_vm.cpp
+    src/rco_menu.cpp
 )
 target_link_libraries(umdplay_core PUBLIC
     ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES}
@@ -92,6 +93,7 @@ add_executable(umdplay
     src/ui_manager.cpp
     src/wmc_ui.cpp
     src/clip_export.cpp
+    src/rco_texture.cpp
 )
 target_link_libraries(umdplay PRIVATE
     umdplay_core imgui_backends stb_image

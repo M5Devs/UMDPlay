@@ -1286,8 +1286,10 @@ bool WmcUi::draw_osd(ImDrawList* dl, float w, float h, float alpha,
                      bool paused, double elapsed, double total,
                      float volume, bool muted, bool fullscreen,
                      bool settings_open, int chapter, int chapter_count,
-                     bool& gear_clicked, WmcInput& out) {
+                     bool has_menu, bool& gear_clicked, bool& menu_clicked,
+                     WmcInput& out) {
     gear_clicked = false;
+    menu_clicked = false;
     if (alpha <= 0.001f) return false;
 
     const float bar_h = 112.0f;
@@ -1417,6 +1419,8 @@ bool WmcUi::draw_osd(ImDrawList* dl, float w, float h, float alpha,
     // Fullscreen (rightmost), Mute, Gear (opens the Settings overlay).
     if (rcircle(fullscreen ? "Win" : "FS", false)) out.action = WmcAction::ToggleFullscreen;
     if (rcircle(muted ? "Unm" : "Mut", false)) out.action = WmcAction::MuteToggled;
+    // Disc Menu entry point (only when the disc ships an .RCO menu).
+    if (has_menu && rcircle("Menu", false)) menu_clicked = true;
     if (rcircle("\xE2\x9A\x99", settings_open)) gear_clicked = true;   // gear glyph (U+2699)
 
     // Volume slider between the transport and the right group.
@@ -1548,8 +1552,9 @@ WmcInput WmcUi::render_player(SDL_Texture* video_tex, int video_w, int video_h,
                               bool& osd_visible, bool& settings_open,
                               int& setting_sel, aspect::Mode aspect_mode,
                               const PlayerMediaInfo& mi,
-                              float volume, bool muted,
-                              bool fullscreen, float t) {
+                              float volume, bool muted, bool fullscreen,
+                              bool has_menu, bool& menu_clicked, float t) {
+    menu_clicked = false;
     WmcInput out;
     if (!m_imgui_ready) return out;
 
@@ -1686,9 +1691,10 @@ WmcInput WmcUi::render_player(SDL_Texture* video_tex, int video_w, int video_h,
     bool gear_clicked = false;
     const bool osd_hover = draw_osd(dl, w, h, m_osd_alpha, paused, elapsed, total,
                                     volume, muted, fullscreen, settings_open,
-                                    mi.chapter, mi.chapter_count,
-                                    gear_clicked, out);
+                                    mi.chapter, mi.chapter_count, has_menu,
+                                    gear_clicked, menu_clicked, out);
     if (gear_clicked) { settings_open = !settings_open; setting_sel = 0; osd_visible = true; m_last_input_time = t; }
+    if (menu_clicked) { out.action = WmcAction::OpenDiscMenu; osd_visible = false; }
 
     // --- Settings overlay (keeps playback running) ---
     if (settings_open) draw_settings_overlay(dl, w, h, 1.0f, setting_sel, aspect_mode,
@@ -1707,4 +1713,165 @@ WmcInput WmcUi::render_player(SDL_Texture* video_tex, int video_w, int video_h,
 
     ImGui::End();
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// Interactive Disc Menu (.RCO pages)
+// ---------------------------------------------------------------------------
+// Renders the active RCO page as a 16:9 letterboxed panel centred in the
+// window: planes/backgrounds first, then buttons (with the "_sel" art and a
+// glowing focus ring on the focused one). Input: arrow keys / D-pad move the
+// focus, Enter / click / tap activate, Esc / Backspace go back, plus mouse
+// hover and touch taps. Returns the resulting MenuAction (if any).
+DiscMenuResult WmcUi::render_disc_menu(umdplay::RcoMenu& menu,
+                                       const umdplay::RcoTextureCache& tex,
+                                       const DiscItem& disc, float t) {
+    DiscMenuResult res;
+    if (!m_imgui_ready) return res;
+
+    ImGuiIO& io = ImGui::GetIO();
+    const float w = io.DisplaySize.x, h = io.DisplaySize.y;
+
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(w, h));
+    ImGui::Begin("##wmc_discmenu", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                 ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Deep backdrop + soft vignette.
+    dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(2, 6, 16, 255));
+    draw_aurora(dl, w, h, t, nullptr);
+
+    // Letterbox the 854x480 design space into the window (16:9 preserved).
+    const float design_ar = umdplay::kMenuDesignW / umdplay::kMenuDesignH;
+    float panel_w = w * 0.92f;
+    float panel_h = panel_w / design_ar;
+    if (panel_h > h * 0.86f) { panel_h = h * 0.86f; panel_w = panel_h * design_ar; }
+    const float px = (w - panel_w) * 0.5f;
+    const float py = (h - panel_h) * 0.5f + 6.0f;
+
+    dl->AddRectFilled(ImVec2(px, py), ImVec2(px + panel_w, py + panel_h),
+                      IM_COL32(0, 0, 0, 235), 10.0f);
+    dl->AddRect(ImVec2(px, py), ImVec2(px + panel_w, py + panel_h),
+                with_alpha(kGlassHi, 0.22f), 10.0f, 0, 1.4f);
+
+    auto to_px = [&](const umdplay::RcoMenuItem& it) {
+        return ImVec4(px + it.rect_x * panel_w, py + it.rect_y * panel_h,
+                      px + (it.rect_x + it.rect_w) * panel_w,
+                      py + (it.rect_y + it.rect_h) * panel_h);
+    };
+
+    dl->PushClipRect(ImVec2(px, py), ImVec2(px + panel_w, py + panel_h), true);
+
+    const umdplay::RcoMenuItem* hovered = nullptr;
+    // Hover/pointer focus (mouse or touch). Only re-focus when the pointer
+    // actually moves, so keyboard/D-pad navigation is not clobbered by a
+    // stationary cursor sitting over the panel.
+    const ImVec2 mp = ImGui::GetMousePos();
+    const ImVec2 md = io.MouseDelta;
+    const bool inside = mp.x >= px && mp.x <= px + panel_w &&
+                        mp.y >= py && mp.y <= py + panel_h;
+    if (inside && (md.x != 0.0f || md.y != 0.0f))
+        menu.focus_at((mp.x - px) / panel_w, (mp.y - py) / panel_h);
+    if (inside) {
+        const auto& items = menu.page().items;
+        const umdplay::RcoMenuItem* foc = menu.focused_item();
+        for (const auto& it : items)
+            if (it.is_button && foc && it.obj_offset == foc->obj_offset) hovered = &it;
+    }
+
+    // Draw planes/backgrounds, then buttons.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const auto& it : menu.page().items) {
+            const bool is_btn = it.is_button;
+            if ((pass == 0) == is_btn) continue;
+            const ImVec4 r = to_px(it);
+            if (it.image_offset != 0xFFFFFFFF) {
+                SDL_Texture* tx = tex.get(it.image_offset);
+                SDL_Texture* sel = (it.focused && it.image_sel_offset != 0xFFFFFFFF)
+                                       ? tex.get(it.image_sel_offset) : nullptr;
+                if (sel) tx = sel;
+                if (tx) {
+                    dl->AddImage(reinterpret_cast<ImTextureID>(tx),
+                                 ImVec2(r.x, r.y), ImVec2(r.z, r.w),
+                                 ImVec2(0, 0), ImVec2(1, 1),
+                                 IM_COL32(static_cast<int>(it.red * 255),
+                                          static_cast<int>(it.green * 255),
+                                          static_cast<int>(it.blue * 255),
+                                          static_cast<int>(it.alpha * 255)));
+                }
+            }
+        }
+    }
+
+    // Focus ring: a glowing rounded rect around the focused button.
+    const umdplay::RcoMenuItem* focus = menu.focused_item();
+    if (focus) {
+        const ImVec4 r = to_px(*focus);
+        const float pad = 3.0f;
+        const float pulse = 0.55f + 0.45f * (0.5f + 0.5f * std::sin(t * 6.0f));
+        dl->AddRect(ImVec2(r.x - pad, r.y - pad), ImVec2(r.z + pad, r.w + pad),
+                    with_alpha(kAccent, 0.55f + 0.35f * pulse), 8.0f, 0, 3.0f);
+        dl->AddRect(ImVec2(r.x - pad - 2, r.y - pad - 2),
+                    ImVec2(r.z + pad + 2, r.w + pad + 2),
+                    with_alpha(kCobaltGlow, 0.35f * pulse), 10.0f, 0, 6.0f);
+    }
+    dl->PopClipRect();
+
+    // Header: disc title + page name + page counter.
+    {
+        const std::string title = disc.title.empty() ? std::string("Disc Menu") : disc.title;
+        dl->AddText(m_font_title, 20.0f, ImVec2(px, py - 30.0f),
+                    with_alpha(kTextPrimary, 0.95f), title.c_str());
+        char pg[64];
+        std::snprintf(pg, sizeof(pg), "%s   %d/%d", menu.page_name().c_str(),
+                      menu.index_1based(), menu.page_count());
+        const float pw = ImGui::CalcTextSize(pg).x;
+        dl->AddText(m_font_body, 15.0f, ImVec2(px + panel_w - pw, py - 26.0f),
+                    with_alpha(kAccent, 0.9f), pg);
+    }
+
+    // --- Input -------------------------------------------------------------
+    auto take_key = [&](ImGuiKey k) { return ImGui::IsKeyPressed(k, true); };
+    if (take_key(ImGuiKey_LeftArrow))  menu.move_focus(-1, 0);
+    if (take_key(ImGuiKey_RightArrow)) menu.move_focus(1, 0);
+    if (take_key(ImGuiKey_UpArrow))    menu.move_focus(0, -1);
+    if (take_key(ImGuiKey_DownArrow))  menu.move_focus(0, 1);
+
+    bool activated = false;
+    if (take_key(ImGuiKey_Enter) || take_key(ImGuiKey_Space) ||
+        take_key(ImGuiKey_KeypadEnter)) {
+        res.action = menu.activate_focused();
+        activated = true;
+    }
+    // Mouse click / touch tap on a button.
+    if (ImGui::IsMouseClicked(0) && hovered) {
+        res.action = menu.activate_at((mp.x - px) / panel_w, (mp.y - py) / panel_h);
+        activated = true;
+    }
+    if (take_key(ImGuiKey_Escape) || take_key(ImGuiKey_Backspace)) {
+        umdplay::MenuAction back = menu.back();
+        if (back.kind == umdplay::MenuActionKind::ExitMenu) res.close = true;
+        else res.action = back;
+    }
+
+    // After a press, let the disc's own onMenu state machine act (it may ask
+    // for playback even when the button itself only set a flag).
+    if (activated && res.action.kind != umdplay::MenuActionKind::ExitMenu) {
+        auto step = menu.step_script();
+        if (step.play_requested && res.action.kind == umdplay::MenuActionKind::None) {
+            res.action.kind = umdplay::MenuActionKind::PlayMovie;
+            res.action.track = step.play_track;
+            res.action.chapter = step.play_chapter;
+        }
+    }
+    // Footer hint bar.
+    std::string hint = "ARROWS / D-PAD  move     ENTER / A  select     "
+                       "MOUSE / TOUCH  tap     ESC / B  back";
+    if (hovered) hint = std::string("SELECT  ") + hovered->name + "     " + hint;
+    draw_footer(dl, w, h, hint);
+
+    ImGui::End();
+    return res;
 }

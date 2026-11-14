@@ -86,6 +86,14 @@ struct VsmxProgram {
 // Decode a raw VSMX blob (must begin with the "VSMX" signature). Never throws.
 VsmxProgram decode_vsmx(const uint8_t* data, size_t size);
 
+// Build a program from an already-decoded instruction stream (raw 8-byte
+// groups) plus its constant pools. Used by callers that split the container
+// themselves (e.g. the .RCO parser) instead of holding the whole blob.
+VsmxProgram make_vsmx_program(const std::vector<uint8_t>& code,
+                              const std::vector<std::string>& texts,
+                              const std::vector<std::string>& properties,
+                              const std::vector<std::string>& names);
+
 // Render a decoded program as a disassembly listing (one line per group).
 std::string disassemble(const VsmxProgram& prog);
 
@@ -183,6 +191,10 @@ public:
     // ran to completion.
     bool call_event(const std::string& event,
                     const std::vector<std::string>& args = {});
+
+    // Read a top-level script variable (e.g. the menu's "pageID"/"focusID"
+    // globals). Returns Undefined when the name was never assigned.
+    VsmxValue global(const std::string& name) const;
 
     // Diagnostics.
     size_t steps() const { return m_steps; }

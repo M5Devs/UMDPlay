@@ -147,6 +147,7 @@ SHIFT+LEFT/RIGHT      seek -30 s / +30 s
 drag the timeline     scrub to any position (releases into a seek)
 UP / DOWN             volume -5% / +5%
 M                     mute / unmute
+T                     open the Disc Menu (when the disc ships one)
 PageUp / [            previous chapter (restart current, else step back)
 PageDown / ]          next chapter
 F11 / Alt+Enter       toggle fullscreen
@@ -156,6 +157,17 @@ ESC / BACKSPACE       stop and return to the Hub
 Chapters come from `PLAYLIST.UMD`: the hub's **Chapters** action opens a marker
 list for the main feature, and the player transport carries `|<` / `>|` buttons
 plus a `CH n/N` readout. Seeks snap to the exact marker timestamp.
+
+### Disc Menu (native `.RCO` pages)
+
+When the disc ships an interactive menu (`RESOURCE/*.RCO`), the player's OSD
+grows a **Menu** button and the `T` key opens the **Disc Menu**: the disc's own
+`.RCO` pages, drawn from the embedded PNG art, navigated with the arrow keys or
+D-pad (mouse hover and touch taps focus directly). Each button fires the page's
+own VSMX `onPush` handler, so page switches (`pageID`), the chapter list and
+"play the feature" all behave as the disc authored them. The focused button
+shows its `_sel` artwork and a glowing ring; `ESC`/`B` steps back a page (or
+leaves the menu at the top level) and `ENTER`/`A` activates.
 
 Seeking flushes the FFmpeg codec buffers, re-anchors the hand-demuxed PSMF
 ATRAC3+ reader on a real MPEG-PS pack boundary, resyncs video to the next

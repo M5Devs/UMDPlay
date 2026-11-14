@@ -122,6 +122,29 @@ VsmxProgram decode_vsmx(const uint8_t* d, size_t n) {
     return p;
 }
 
+VsmxProgram make_vsmx_program(const std::vector<uint8_t>& code,
+                              const std::vector<std::string>& texts,
+                              const std::vector<std::string>& properties,
+                              const std::vector<std::string>& names) {
+    VsmxProgram p;
+    const size_t groups = code.size() / 8;
+    p.code.reserve(groups);
+    for (size_t i = 0; i < groups; ++i) {
+        const uint8_t* q = code.data() + i * 8;
+        VsmxInstr in;
+        in.id    = static_cast<uint32_t>(q[0]) | (static_cast<uint32_t>(q[1]) << 8) |
+                   (static_cast<uint32_t>(q[2]) << 16) | (static_cast<uint32_t>(q[3]) << 24);
+        in.value = static_cast<uint32_t>(q[4]) | (static_cast<uint32_t>(q[5]) << 8) |
+                   (static_cast<uint32_t>(q[6]) << 16) | (static_cast<uint32_t>(q[7]) << 24);
+        p.code.push_back(in);
+    }
+    p.texts = texts;
+    p.properties = properties;
+    p.names = names;
+    p.valid = !p.code.empty();
+    return p;
+}
+
 std::string disassemble(const VsmxProgram& prog) {
     std::string out;
     char buf[256];
@@ -898,6 +921,11 @@ bool VsmxMachine::run() {
     m_error = m_impl->error;
     m_last_float = m_impl->last_float;
     return m_error.empty();
+}
+
+VsmxValue VsmxMachine::global(const std::string& name) const {
+    auto it = m_impl->globals->props.find(name);
+    return it != m_impl->globals->props.end() ? it->second : VsmxValue();
 }
 
 bool VsmxMachine::call_event(const std::string& event,
