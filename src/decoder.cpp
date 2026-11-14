@@ -1,5 +1,7 @@
 #include "decoder.h"
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <sstream>
@@ -330,7 +332,30 @@ bool Decoder::psmf_read_more() {
             if (sid == 0xBD) {
                 uint8_t hdrlen = d[sc + 8];
                 size_t data_off = sc + 9 + hdrlen + 4;  // skip PES opts + 4-byte substream hdr
-                if (data_off < pes_end) {
+                // Extract the PES PTS (90 kHz) when present so the demuxer can
+                // skip audio that precedes the video's first post-seek frame.
+                int64_t pts = AV_NOPTS_VALUE;
+                if (sc + 14 <= got && (d[sc + 7] & 0x80)) {
+                    const uint8_t* q = d + sc + 9;
+                    pts = (static_cast<int64_t>((q[0] >> 1) & 0x07) << 30) |
+                          (static_cast<int64_t>(q[1]) << 22) |
+                          (static_cast<int64_t>((q[2] >> 1) & 0x7f) << 15) |
+                          (static_cast<int64_t>(q[3]) << 7) |
+                          (static_cast<int64_t>((q[4] >> 1) & 0x7f));
+                }
+                // Drop audio that starts before the video anchor (once known).
+                // Continuation PES packets carry no PTS, so gate them on whether
+                // an accepted frame has begun.
+                const bool before_anchor =
+                    m_pts_anchor >= 0.0 && pts != AV_NOPTS_VALUE &&
+                    (static_cast<double>(pts) / 90000.0) < m_pts_anchor;
+                if (before_anchor) {
+                    m_psmf_pts_started = false;   // restart once we pass the anchor
+                } else if (pts != AV_NOPTS_VALUE) {
+                    m_psmf_pts_started = true;
+                    if (m_psmf_next_pts == AV_NOPTS_VALUE) m_psmf_next_pts = pts;
+                }
+                if (!before_anchor && m_psmf_pts_started && data_off < pes_end) {
                     m_psmf_pes.insert(m_psmf_pes.end(), d + data_off, d + pes_end);
                     consumed_something = true;
                 }
@@ -401,6 +426,132 @@ size_t Decoder::psmf_detect_stride() {
     return detect_stride_from(buf.data(), got, SONY_FRAME_STRIDE);
 }
 
+// ---------------------------------------------------------------------------
+// Deinterlacing (yadif)
+// ---------------------------------------------------------------------------
+
+void Decoder::set_deinterlace(bool on) {
+    if (m_deinterlace == on) return;
+    m_deinterlace = on;
+    free_deinterlace_graph();
+}
+
+void Decoder::free_deinterlace_graph() {
+#if defined(UMDPLAY_HAVE_AVFILTER)
+    if (m_filter_graph) avfilter_graph_free(&m_filter_graph);
+    m_filter_graph = nullptr;
+    m_filter_src = nullptr;
+    m_filter_sink = nullptr;
+    if (m_filter_out) av_frame_free(&m_filter_out);
+    m_filter_w = m_filter_h = 0;
+    m_filter_fmt = -1;
+#endif
+}
+
+#if defined(UMDPLAY_HAVE_AVFILTER)
+
+// Build (or rebuild) the yadif graph for the frame's geometry/pixel format.
+bool Decoder::ensure_deinterlace_graph(const AVFrame* f) {
+    if (m_filter_graph && m_filter_w == f->width && m_filter_h == f->height &&
+        m_filter_fmt == f->format) {
+        return true;
+    }
+    free_deinterlace_graph();
+
+    const AVFilter* src = avfilter_get_by_name("buffer");
+    const AVFilter* sink = avfilter_get_by_name("buffersink");
+    const AVFilter* yadif = avfilter_get_by_name("yadif");
+    if (!src || !sink || !yadif) return false;
+
+    m_filter_graph = avfilter_graph_alloc();
+    if (!m_filter_graph) return false;
+
+    char args[256];
+    std::snprintf(args, sizeof(args),
+                  "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d:"
+                  "range=%s:colorspace=%s",
+                  f->width, f->height, f->format,
+                  static_cast<int>(m_fps > 0.0 ? m_fps * 1000 : 30000), 1000,
+                  f->sample_aspect_ratio.num ? f->sample_aspect_ratio.num : 1,
+                  f->sample_aspect_ratio.den ? f->sample_aspect_ratio.den : 1,
+                  f->color_range == AVCOL_RANGE_JPEG ? "pc" : "tv",
+                  av_color_space_name(f->colorspace) ? av_color_space_name(f->colorspace)
+                                                     : "bt470bg");
+
+    if (avfilter_graph_create_filter(&m_filter_src, src, "in", args, nullptr,
+                                     m_filter_graph) < 0) {
+        free_deinterlace_graph();
+        return false;
+    }
+    if (avfilter_graph_create_filter(&m_filter_sink, sink, "out", nullptr, nullptr,
+                                     m_filter_graph) < 0) {
+        free_deinterlace_graph();
+        return false;
+    }
+    // yadif mode=0 emits one frame per input (1-in/1-out), which keeps the fixed
+    // frame clock the PSMF pacing relies on.
+    AVFilterContext* yadif_ctx = nullptr;
+    if (avfilter_graph_create_filter(&yadif_ctx, yadif, "yadif", "mode=0", nullptr,
+                                     m_filter_graph) < 0) {
+        free_deinterlace_graph();
+        return false;
+    }
+    if (avfilter_link(m_filter_src, 0, yadif_ctx, 0) < 0 ||
+        avfilter_link(yadif_ctx, 0, m_filter_sink, 0) < 0 ||
+        avfilter_graph_config(m_filter_graph, nullptr) < 0) {
+        free_deinterlace_graph();
+        return false;
+    }
+
+    m_filter_out = av_frame_alloc();
+    if (!m_filter_out) {
+        free_deinterlace_graph();
+        return false;
+    }
+    m_filter_w = f->width;
+    m_filter_h = f->height;
+    m_filter_fmt = f->format;
+    return true;
+}
+
+// Run one interlaced frame through the yadif graph, replacing `f` in place.
+bool Decoder::maybe_deinterlace(AVFrame* f) {
+    if (!m_deinterlace || !f) return false;
+    const bool interlaced = (f->flags & AV_FRAME_FLAG_INTERLACED) != 0;
+    m_last_interlaced = interlaced;
+    if (!interlaced) return false;
+
+    if (!ensure_deinterlace_graph(f)) return false;
+
+    if (av_buffersrc_add_frame_flags(m_filter_src, f, AV_BUFFERSRC_FLAG_KEEP_REF) < 0) {
+        return false;
+    }
+    av_frame_unref(m_filter_out);
+    if (av_buffersink_get_frame(m_filter_sink, m_filter_out) < 0) {
+        return false;
+    }
+    // yadif clears the interlaced flag; carry the timing over so the caller's
+    // clock logic is unaffected.
+    m_filter_out->pts = f->pts;
+    m_filter_out->best_effort_timestamp = f->best_effort_timestamp;
+
+    av_frame_unref(f);
+    if (av_frame_ref(f, m_filter_out) < 0) return false;
+    return true;
+}
+
+#else  // !UMDPLAY_HAVE_AVFILTER
+
+bool Decoder::ensure_deinterlace_graph(const AVFrame*) { return false; }
+
+bool Decoder::maybe_deinterlace(AVFrame* f) {
+    if (!m_deinterlace || !f) return false;
+    m_last_interlaced = (f->flags & AV_FRAME_FLAG_INTERLACED) != 0;
+    return false;  // no filter available; pass the frame through
+}
+
+#endif
+
 // Decode the next available ATRAC3+ frame into out_pcm (S16 stereo).
 void Decoder::process_psmf_audio(AVFrame* audio_frame, std::vector<uint8_t>& out_pcm, bool flush) {
     if (!m_audio.codec_ctx) return;
@@ -455,6 +606,47 @@ void Decoder::process_psmf_audio(AVFrame* audio_frame, std::vector<uint8_t>& out
     }
 }
 
+// One-shot alignment of the first post-seek PCM chunk. `m_pts_anchor` is the
+// video PTS (seconds) of the first decoded frame after the seek; `m_psmf_next_pts`
+// is the 90 kHz PES PTS of the first audio frame the hand demuxer will emit.
+// Both are placed at t=0 in the exported clip, so the audio must be shifted to
+// start on the video frame's content time: skip `video_pts - audio_pts` seconds
+// of audio when the audio starts early, or prepend silence when it starts late.
+void Decoder::apply_psmf_align(std::vector<uint8_t>& pcm) {
+    if (m_psmf_align_done || pcm.empty()) return;
+    if (m_pts_anchor < 0.0 || m_psmf_next_pts == AV_NOPTS_VALUE) return;
+
+    constexpr int    kRate    = 44100;
+    constexpr int    kChans   = 2;
+    constexpr size_t kFrameSz = sizeof(int16_t) * kChans;   // bytes per stereo frame
+
+    const double audio_pts = static_cast<double>(m_psmf_next_pts) / 90000.0;
+    // >0: the audio's first sample is earlier than the video frame -> drop it.
+    const double lead      = m_pts_anchor - audio_pts;
+    const int64_t frames   = static_cast<int64_t>(std::llround(lead * kRate));
+    m_psmf_align_done = true;
+
+    // Ignore sub-frame noise; only correct real offsets (and never shift more
+    // than a few seconds, which would signal a bad PTS).
+    if (std::llabs(frames) < 2 || std::llabs(frames) > kRate * 5) return;
+
+    if (frames > 0) {
+        // Audio starts early: drop the leading `frames` stereo samples.
+        const size_t drop = static_cast<size_t>(frames) * kFrameSz;
+        if (drop < pcm.size()) {
+            pcm.erase(pcm.begin(), pcm.begin() + static_cast<std::ptrdiff_t>(drop));
+        } else {
+            // The whole chunk is early; remember the remainder to drop next time.
+            m_psmf_pts_skip_samples = frames - static_cast<int64_t>(pcm.size() / kFrameSz);
+            pcm.clear();
+        }
+    } else {
+        // Audio starts late: prepend silence so it lines up with the frame.
+        const size_t pad = static_cast<size_t>(-frames) * kFrameSz;
+        pcm.insert(pcm.begin(), pad, 0);
+    }
+}
+
 bool Decoder::resample_to_s16(AVFrame* audio_frame, std::vector<uint8_t>& out_pcm) {
     if (!m_swr_ctx || !audio_frame) return false;
     int out_samples = audio_frame->nb_samples;
@@ -474,6 +666,19 @@ bool Decoder::resample_to_s16(AVFrame* audio_frame, std::vector<uint8_t>& out_pc
         return false;
     }
     out_pcm.resize(orig + static_cast<size_t>(converted) * 2 * sizeof(int16_t));
+
+    // Apply the one-shot post-seek alignment to the very first chunk emitted.
+    if (!m_psmf_align_done) apply_psmf_align(out_pcm);
+
+    // Honour any residual skip left over from a chunk that was entirely early.
+    if (m_psmf_pts_skip_samples > 0 && !out_pcm.empty()) {
+        constexpr size_t kFrameSz = sizeof(int16_t) * 2;
+        const size_t avail = out_pcm.size() / kFrameSz;
+        const size_t drop  = std::min<size_t>(avail, static_cast<size_t>(m_psmf_pts_skip_samples));
+        out_pcm.erase(out_pcm.begin(),
+                      out_pcm.begin() + static_cast<std::ptrdiff_t>(drop * kFrameSz));
+        m_psmf_pts_skip_samples -= static_cast<int64_t>(drop);
+    }
     return true;
 }
 
@@ -484,6 +689,12 @@ void Decoder::reset_psmf_audio(uint64_t scan_offset) {
     m_psmf_eof = false;
     m_psmf_samples = 0;
     m_psmf_video_pending = false;
+    // Drop any alignment computed for the previous position; it is recomputed
+    // from the first PES PTS seen after this anchor.
+    m_psmf_next_pts = AV_NOPTS_VALUE;
+    m_psmf_pts_skip_samples = 0;
+    m_psmf_align_done = false;
+    m_psmf_pts_started = true;
     if (m_audio.codec_ctx) avcodec_flush_buffers(m_audio.codec_ctx);
 }
 
@@ -499,16 +710,19 @@ FrameType Decoder::decode_video_frame(AVFrame* out) {
         if (ret < 0) return FrameType::Eof;
         if (m_video.stream_index != -1 && m_demux_pkt->stream_index == m_video.stream_index) {
             // After a seek, drop packets until the next keyframe so the decoder
-            // never starts on a partial GOP (avoids corrupt macroblocks).
+            // never starts on a partial GOP (avoids corrupt macroblocks). Clear
+            // the flag as soon as the keyframe is *sent* (not when a frame is
+            // received) so the frames that follow it are not dropped too, which
+            // would otherwise skip ahead to the next keyframe (~1-2 s later).
             if (m_resync_video && !(m_demux_pkt->flags & AV_PKT_FLAG_KEY)) {
                 av_packet_unref(m_demux_pkt);
                 continue;
             }
+            m_resync_video = false;
             int r = avcodec_send_packet(m_video.codec_ctx, m_demux_pkt);
             av_packet_unref(m_demux_pkt);
             if (r >= 0) {
                 if (avcodec_receive_frame(m_video.codec_ctx, out) >= 0) {
-                    m_resync_video = false;
                     return FrameType::Video;
                 }
             }
@@ -596,7 +810,16 @@ FrameType Decoder::read_frame(AVFrame* video_frame, std::vector<uint8_t>& audio_
             if (decode_video_frame(m_psmf_video) != FrameType::Video) {
                 return FrameType::Eof;
             }
+            maybe_deinterlace(m_psmf_video);
             m_psmf_video_pending = true;
+            // Anchor audio to the first frame actually delivered after a seek:
+            // the manual demuxer otherwise starts at the seek byte offset, which
+            // can lead or lag the decoder's keyframe PTS by seconds.
+            if (m_pts_anchor < 0.0) {
+                const double vpts = frame_time(m_psmf_video,
+                                               m_fmt_ctx->streams[m_video.stream_index]);
+                if (vpts >= 0.0) m_pts_anchor = vpts;
+            }
         }
 
         const double fps = (m_fps > 0.0 && m_fps < 240.0) ? m_fps : 29.97;
@@ -624,6 +847,7 @@ FrameType Decoder::read_frame(AVFrame* video_frame, std::vector<uint8_t>& audio_
         // First check if video codec context has any buffered frames available
         if (m_video.codec_ctx && video_frame) {
             if (avcodec_receive_frame(m_video.codec_ctx, video_frame) >= 0) {
+                maybe_deinterlace(video_frame);
                 const double pts = frame_time(video_frame, m_fmt_ctx->streams[m_video.stream_index]);
                 if (pts >= 0.0) m_clock = pts;
                 else m_clock += 1.0 / ((m_fps > 0.0 && m_fps < 240.0) ? m_fps : 29.97);
@@ -638,15 +862,17 @@ FrameType Decoder::read_frame(AVFrame* video_frame, std::vector<uint8_t>& audio_
 
         if (m_video.stream_index != -1 && m_demux_pkt->stream_index == m_video.stream_index) {
             // After a seek, drop packets until the next keyframe so the decoder
-            // never starts on a partial GOP (avoids corrupt macroblocks).
+            // never starts on a partial GOP. Clear the flag on send (not on
+            // receive) so the following P-frames are kept, not skipped.
             if (m_resync_video && !(m_demux_pkt->flags & AV_PKT_FLAG_KEY)) {
                 av_packet_unref(m_demux_pkt);
                 continue;
             }
+            m_resync_video = false;
             if (avcodec_send_packet(m_video.codec_ctx, m_demux_pkt) >= 0) {
                 av_packet_unref(m_demux_pkt);
                 if (video_frame && avcodec_receive_frame(m_video.codec_ctx, video_frame) >= 0) {
-                    m_resync_video = false;
+                    maybe_deinterlace(video_frame);
                     const double pts = frame_time(video_frame, m_fmt_ctx->streams[m_video.stream_index]);
                     if (pts >= 0.0) m_clock = pts;
                     else m_clock += 1.0 / ((m_fps > 0.0 && m_fps < 240.0) ? m_fps : 29.97);
@@ -721,6 +947,22 @@ bool Decoder::seek_absolute(double seconds) {
     m_audio_buffer.clear();
     m_psmf_video_pending = false;
     m_resync_video = true;
+    // Force a fresh video PTS anchor; audio alignment is recomputed from the
+    // first PES PTS seen after the new position.
+    m_pts_anchor = -1.0;
+    // Flush the deinterlace graph so no pre-seek frames leak into the new GOP.
+#if defined(UMDPLAY_HAVE_AVFILTER)
+    if (m_filter_src) {
+        const int flush_ret = av_buffersrc_add_frame_flags(m_filter_src, nullptr, 0);
+        (void)flush_ret;
+    }
+    if (m_filter_sink) {
+        av_frame_unref(m_filter_out);
+        while (av_buffersink_get_frame(m_filter_sink, m_filter_out) >= 0) {
+            av_frame_unref(m_filter_out);
+        }
+    }
+#endif
 
     int ret = av_seek_frame(m_fmt_ctx, -1, seek_offset, flags);
     if (ret < 0) {
@@ -816,6 +1058,7 @@ void Decoder::save_ppm(AVFrame* frame, int width, int height, const std::string&
 
 void Decoder::close() {
     m_audio_buffer.clear();
+    free_deinterlace_graph();
     if (m_psmf_pkt) { av_packet_free(&m_psmf_pkt); }
     if (m_psmf_video) { av_frame_free(&m_psmf_video); }
     if (m_psmf_file.is_open()) m_psmf_file.close();
@@ -826,8 +1069,13 @@ void Decoder::close() {
     m_psmf_cursor = 0;
     m_psmf_samples = 0;
     m_psmf_video_pending = false;
+    m_psmf_next_pts = AV_NOPTS_VALUE;
+    m_psmf_pts_skip_samples = 0;
+    m_psmf_align_done = false;
+    m_psmf_pts_started = true;
     m_vcount = 0;
     m_clock = 0.0;
+    m_pts_anchor = -1.0;
     m_resync_video = false;
     if (m_swr_ctx) { swr_free(&m_swr_ctx); }
     if (m_temp_audio_frame) { av_frame_free(&m_temp_audio_frame); }

@@ -20,11 +20,15 @@ pkg_check_modules(AVCODEC REQUIRED libavcodec)
 pkg_check_modules(AVUTIL REQUIRED libavutil)
 pkg_check_modules(SWSCALE REQUIRED libswscale)
 pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
+# libavfilter is optional: it powers yadif deinterlacing of 480i content. When
+# absent the decoder passes interlaced frames through unchanged.
+pkg_check_modules(AVFILTER libavfilter)
 pkg_check_modules(SDL2 REQUIRED sdl2)
 
 include_directories(
     ${AVFORMAT_INCLUDE_DIRS} ${AVCODEC_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS}
-    ${SWSCALE_INCLUDE_DIRS} ${SWRESAMPLE_INCLUDE_DIRS} ${SDL2_INCLUDE_DIRS}
+    ${SWSCALE_INCLUDE_DIRS} ${SWRESAMPLE_INCLUDE_DIRS} ${AVFILTER_INCLUDE_DIRS}
+    ${SDL2_INCLUDE_DIRS}
 )
 
 # --- Dear ImGui (lightweight, fetched & pinned) ---
@@ -67,8 +71,14 @@ add_library(umdplay_core STATIC
 )
 target_link_libraries(umdplay_core PUBLIC
     ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES}
-    ${SWSCALE_LIBRARIES} ${SWRESAMPLE_LIBRARIES}
+    ${SWSCALE_LIBRARIES} ${SWRESAMPLE_LIBRARIES} ${AVFILTER_LIBRARIES}
 )
+if(AVFILTER_FOUND)
+    target_compile_definitions(umdplay_core PUBLIC UMDPLAY_HAVE_AVFILTER=1)
+    message(STATUS "UMDPlay: libavfilter found — yadif deinterlacing enabled")
+else()
+    message(STATUS "UMDPlay: libavfilter not found — interlaced frames pass through")
+endif()
 target_compile_options(umdplay_core PRIVATE -Wall -Wextra -Wpedantic)
 
 # --- Player executable ---

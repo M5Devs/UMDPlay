@@ -10,6 +10,11 @@
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
+#if defined(UMDPLAY_HAVE_AVFILTER)
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
+#endif
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 #include <libavutil/imgutils.h>
@@ -69,6 +74,14 @@ public:
     bool has_audio() const { return m_audio.stream_index != -1 || m_psmf_audio; }
     double get_fps() const { return m_fps; }
 
+    // Enable/disable deinterlacing of decoded video frames. 480i NTSC UMD Video
+    // carries AV_FRAME_FLAG_INTERLACED frames; when enabled (default) they are
+    // run through a yadif filter so fast motion renders without combing.
+    void set_deinterlace(bool on);
+    bool deinterlace_enabled() const { return m_deinterlace; }
+    // True if the most recently returned video frame was interlaced.
+    bool last_frame_interlaced() const { return m_last_interlaced; }
+
     // Coded video dimensions (0 if no video stream is open).
     int video_width() const {
         return m_video.codec_ctx ? m_video.codec_ctx->width : 0;
@@ -103,6 +116,9 @@ private:
     void process_psmf_audio(AVFrame* audio_frame, std::vector<uint8_t>& out_pcm, bool flush);
     bool resample_to_s16(AVFrame* audio_frame, std::vector<uint8_t>& out_pcm);
     void reset_psmf_audio(uint64_t scan_offset);
+    // Trim/pad the first PCM chunk so audio starts on the same timeline as the
+    // video's first post-seek frame (PES PTS vs frame PTS). One-shot per anchor.
+    void apply_psmf_align(std::vector<uint8_t>& pcm);
     // Find the MPEG-PS pack/system-header offset nearest to a byte target so a
     // seek can re-anchor the hand demuxer on a real packet boundary.
     uint64_t psmf_find_scan_offset(uint64_t target);
@@ -116,6 +132,13 @@ private:
     // Decode the next video frame from the FFmpeg demuxer, discarding packets
     // that belong to no tracked stream. Used by the PSMF interleave path.
     FrameType decode_video_frame(AVFrame* out);
+
+    // Deinterlacing: 480i UMD Video frames carry AV_FRAME_FLAG_INTERLACED, so
+    // they are run through a yadif filter graph to remove combing. The graph is
+    // rebuilt when the frame geometry/format changes and flushed on seek.
+    bool ensure_deinterlace_graph(const AVFrame* f);
+    bool maybe_deinterlace(AVFrame* f);
+    void free_deinterlace_graph();
 
     StreamIoState    m_io;
     uint8_t*         m_avio_buffer = nullptr;
@@ -134,6 +157,12 @@ private:
     size_t               m_psmf_pos     = 0;   // parse cursor inside m_psmf_pes
     size_t               m_psmf_stride  = SONY_FRAME_STRIDE_DEFAULT; // detected stride
     int64_t              m_psmf_samples = 0;   // PCM samples emitted so far
+    // PES PTS (90 kHz) of the first audio frame after the current anchor; used
+    // to trim audio so it starts on the same timeline as the first video frame.
+    int64_t              m_psmf_next_pts = AV_NOPTS_VALUE;
+    int64_t              m_psmf_pts_skip_samples = 0; // PCM frames still to drop
+    bool                 m_psmf_align_done = false;   // skip/pad computed for this anchor
+    bool                 m_psmf_pts_started = true;   // accepting audio PES (>= anchor)
     int64_t              m_vcount       = 0;   // video frames emitted (A/V pacing)
     std::vector<uint8_t> m_psmf_scan;          // reusable read buffer
     std::ifstream        m_psmf_file;
@@ -149,6 +178,18 @@ private:
     double           m_duration    = 0.0;   // seconds (0 = unknown)
     double           m_clock       = 0.0;   // last decoded video PTS (seconds)
     bool             m_resync_video = false; // drop to next keyframe after a seek
+    double           m_pts_anchor  = -1.0;  // video PTS of the first post-seek frame
+
+    // Deinterlacing (yadif) filter graph, rebuilt when the frame layout changes.
+    bool             m_deinterlace      = true;
+    bool             m_last_interlaced  = false;
+#if defined(UMDPLAY_HAVE_AVFILTER)
+    AVFilterGraph*   m_filter_graph     = nullptr;
+    AVFilterContext* m_filter_src       = nullptr;
+    AVFilterContext* m_filter_sink      = nullptr;
+    AVFrame*         m_filter_out       = nullptr;
+    int              m_filter_w = 0, m_filter_h = 0, m_filter_fmt = -1;
+#endif
 
     static void save_ppm(AVFrame* frame, int width, int height, const std::string& filename);
 };
