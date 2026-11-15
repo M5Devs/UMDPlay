@@ -311,6 +311,10 @@ struct VsmxMachine::Impl {
     std::vector<VsmxValue> stack;
     std::unordered_map<std::string, std::shared_ptr<VsmxNative>> natives;
     std::shared_ptr<ScriptObject> globals;
+    // Every script object this machine creates, so ~Impl can break reference
+    // cycles (a script may build self-referential graphs that never unwind on
+    // their own, e.g. a focus-out handler caching itself on a global).
+    std::vector<std::weak_ptr<ScriptObject>> created;
     struct Frame {
         std::shared_ptr<ScriptObject> this_obj;
         std::vector<VsmxValue> locals;   // index 1..n hold the arguments
@@ -329,7 +333,31 @@ struct VsmxMachine::Impl {
     bool finished = false;
 
     explicit Impl(const VsmxProgram& p) : prog(p) {
-        globals = std::make_shared<ScriptObject>();
+        globals = make_object();
+    }
+
+    // Allocate a script object and remember it so ~Impl can break cycles.
+    std::shared_ptr<ScriptObject> make_object() {
+        auto o = std::make_shared<ScriptObject>();
+        created.push_back(o);
+        return o;
+    }
+
+    ~Impl() {
+        // Sever every edge out of the objects this machine built. Scripts may
+        // leave self-referential graphs (globals pointing back at objects that
+        // point at globals); clearing props/elements/native frees the cycle
+        // that shared_ptr alone cannot collect.
+        for (auto& w : created) {
+            if (auto o = w.lock()) {
+                o->props.clear();
+                o->elements.clear();
+                o->native.reset();
+            }
+        }
+        stack.clear();
+        frames.clear();
+        globals.reset();
     }
 
     void fail(const std::string& msg) {
@@ -391,7 +419,7 @@ struct VsmxMachine::Impl {
     void push_bool(bool b) { stack.push_back(VsmxValue::boolean(b)); }
 
     VsmxValue make_native(const std::shared_ptr<VsmxNative>& n) {
-        auto s = std::make_shared<ScriptObject>();
+        auto s = make_object();
         s->native = n;
         return VsmxValue::object(s);
     }
@@ -692,7 +720,7 @@ void VsmxMachine::Impl::execute() {
                 break;
             case VSMX_CONST_EMPTY_ARRAY:
             case VSMX_ARRAY: {
-                auto a = std::make_shared<ScriptObject>();
+                auto a = make_object();
                 a->is_array = true;
                 stack.push_back(VsmxValue::object(a));
                 break;
@@ -712,7 +740,7 @@ void VsmxMachine::Impl::execute() {
                 break;
 
             case VSMX_FUNCTION: {
-                auto fn = std::make_shared<ScriptObject>();
+                auto fn = make_object();
                 fn->is_function = true;
                 fn->start_line = static_cast<int>(c.value);
                 fn->fn_args = c.args();
@@ -759,7 +787,7 @@ void VsmxMachine::Impl::execute() {
                 VsmxValue obj = deref(pop());
                 std::string key = c.value < prog.properties.size()
                                       ? prog.properties[c.value] : "";
-                auto m = std::make_shared<ScriptObject>();
+                auto m = make_object();
                 m->props["__method__"] = VsmxValue::string(key);
                 m->props["__self__"] = obj;
                 stack.push_back(VsmxValue::object(m));
@@ -870,12 +898,12 @@ void VsmxMachine::Impl::execute() {
                 VsmxValue target = deref(pop());
                 if (auto fn = as_script(target)) {
                     if (fn->is_function) {
-                        auto this_obj = std::make_shared<ScriptObject>();
+                        auto this_obj = make_object();
                         call_function(fn, this_obj, args, /*return_this=*/true);
                         break;
                     }
                     if (fn->is_array) {
-                        auto arr = std::make_shared<ScriptObject>();
+                        auto arr = make_object();
                         arr->is_array = true;
                         if (c.value == 1)
                             arr->elements.resize(static_cast<size_t>(

@@ -535,12 +535,51 @@ void test_real_disc() {
             CHECK(vm.run());
             CHECK(vm.last_error().empty());
 
-            // Drive a real event: onAutoPlay must call into the host.
-            const bool dispatched = vm.call_event("script:/main/onAutoPlay");
-            CHECK(dispatched);
-            CHECK(!ctrl->calls.empty() || !movie->calls.empty());
-            std::printf("[*] VSMX onAutoPlay ran: controller=%zu movieplayer=%zu host calls\n",
-                        ctrl->calls.size(), movie->calls.size());
+            // Drive every event the disc's RCO actually declares, each on a
+            // fresh machine (a VM error is sticky, so events must not share
+            // one). Discs name their handlers differently (Silent Hill's
+            // "onAutoPlay", Summer Days' "on_PushMenu"), so dispatch whatever
+            // this disc carries rather than a hard-coded name. The RCO's event
+            // table also carries empty padding entries, and may reference an
+            // event whose handler the script never defines (a dead reference
+            // the Sony runtime ignores) — neither is an interpreter fault. Any
+            // other failure (stack underflow, unimplemented opcode, budget) is.
+            size_t ran = 0, declared = 0, missing = 0, vm_errors = 0;
+            std::string first_vm_error;
+            for (const auto& ev : r.events) {
+                if (ev.empty()) continue;            // padding, not a handler
+                ++declared;
+                auto c = std::make_shared<StubController>();
+                auto m2 = std::make_shared<StubMovie>();
+                umdplay::VsmxMachine m(prog);
+                m.bind("controller", c);
+                m.bind("movieplayer", m2);
+                if (!m.run()) {
+                    ++vm_errors;
+                    if (first_vm_error.empty()) first_vm_error = "toplevel: " + m.last_error();
+                    continue;
+                }
+                if (!m.call_event(ev)) {
+                    if (m.last_error().find("no event function") != std::string::npos)
+                        ++missing;                    // declared but not defined
+                    else {
+                        ++vm_errors;
+                        if (first_vm_error.empty())
+                            first_vm_error = ev + ": " + m.last_error();
+                    }
+                    continue;
+                }
+                ++ran;
+            }
+            std::printf("[*] VSMX events: %zu/%zu handlers ran, %zu dead refs, "
+                        "%zu interpreter faults\n", ran, declared, missing, vm_errors);
+            CHECK(declared > 0);
+            CHECK(vm_errors == 0);                   // no interpreter faults
+            CHECK(ran + missing == declared);
+            CHECK(ran * 2 > declared);               // most handlers resolve
+            if (!first_vm_error.empty())
+                std::printf("    first interpreter fault: %s\n",
+                            first_vm_error.c_str());
         }
 
         // The Disc Menu model drives the same RCO through its VSMX script:

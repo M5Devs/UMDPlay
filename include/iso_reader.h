@@ -8,12 +8,16 @@
 // UMD uses 2048-byte sectors (standard UDF/ISO 9660)
 static constexpr size_t UMD_SECTOR_SIZE = 2048;
 
-// Known UDF layout for UMD Video discs (discovered via analysis)
-// Sector 16     : ISO 9660 PVD (dummy - do not use for directory traversal)
-// Sectors 18-19 : UDF Path Table (Little-Endian)
-// Sectors 20-21 : UDF Path Table (Big-Endian)
-// Sector 24     : UMD_VIDEO/ ICB (File Entry) - PARAM.SFO / ICON0.PNG / PIC1.PNG
-// Sector 28     : STREAM/ directory entries (File Identifier Descriptors)
+// UMD Video discs share a conventional layout, but the content root and its
+// STREAM/ sub-directory do NOT sit at a fixed LBA: UMD_VIDEO/ is at 23 or 24
+// and STREAM/ at 28 or 30 depending on the disc (and STREAM/ spans several
+// sectors once a disc carries 90+ streams). The reader therefore locates both
+// by walking the ISO 9660 tree; these constants are only the legacy fallback
+// used when a disc's tree is absent or unreadable.
+//
+// Sector 16     : ISO 9660 PVD (root directory record -> content root)
+// Sector 24     : legacy UMD_VIDEO/ location (fallback)
+// Sector 28     : legacy STREAM/ location (fallback)
 static constexpr uint32_t UMD_STREAM_DIR_LBA = 28;
 static constexpr uint32_t UMD_ROOT_DIR_LBA   = 24;
 

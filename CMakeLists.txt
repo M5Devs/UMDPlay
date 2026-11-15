@@ -201,6 +201,14 @@ set_tests_properties(test_chd PROPERTIES
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     ENVIRONMENT "UMD_ISO=${PROJECT_SOURCE_DIR}/test_umd.iso;UMD_CHD_FIXTURE=${PROJECT_SOURCE_DIR}/tests/fixtures/pattern.chd")
 
+# IsoReader disc-layout discovery: builds a synthetic ISO whose UMD_VIDEO/ and
+# STREAM/ sit away from the legacy fixed LBAs and whose STREAM/ spans several
+# sectors. Needs no real disc.
+add_executable(test_iso_reader tests/test_iso_reader.cpp)
+target_link_libraries(test_iso_reader PRIVATE umdplay_core)
+target_compile_options(test_iso_reader PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME test_iso_reader COMMAND test_iso_reader)
+
 install(TARGETS umdplay DESTINATION bin)
 
 message(STATUS "UMDPlay ${PROJECT_VERSION} — WMC 10-foot UI (ImGui ${IMGUI_TAG})")

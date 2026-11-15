@@ -11,6 +11,36 @@ IsoReader::IsoReader(const std::string& iso_path)
 
 IsoReader::~IsoReader() {}
 
+namespace {
+
+// Case-insensitive suffix test ("00001.MPS" ends with ".mps").
+bool has_ext_ci(const std::string& name, const char* ext) {
+    const size_t n = std::strlen(ext);
+    if (name.size() < n) return false;
+    for (size_t i = 0; i < n; ++i) {
+        const char a = static_cast<char>(std::tolower(
+            static_cast<unsigned char>(name[name.size() - n + i])));
+        const char b = static_cast<char>(std::tolower(
+            static_cast<unsigned char>(ext[i])));
+        if (a != b) return false;
+    }
+    return true;
+}
+
+// A UMD Video stream: an MPEG program stream (.MPS) or program stream (.PMF).
+bool is_stream_file(const std::string& name) {
+    return has_ext_ci(name, ".MPS") || has_ext_ci(name, ".PMF");
+}
+
+// A UMD_VIDEO/ metadata file (PARAM.SFO / ICON*.PNG / PIC1.PNG / SND0.AT3).
+bool is_metadata_file(const std::string& name) {
+    return has_ext_ci(name, "PARAM.SFO") || has_ext_ci(name, "ICON0.PNG") ||
+           has_ext_ci(name, "ICON1.PNG")  || has_ext_ci(name, "PIC1.PNG")  ||
+           has_ext_ci(name, "SND0.AT3");
+}
+
+}  // namespace
+
 bool IsoReader::read_sector(uint32_t lba, uint8_t* buf) const {
     return m_reader.read_sector(lba, buf);
 }
@@ -24,13 +54,32 @@ bool IsoReader::open() {
     std::cout << "[IsoReader] Opened: " << m_iso_path
               << "  [" << m_reader.backend_name() << " backend, "
               << m_reader.size() << " bytes]\n";
-    std::cout << "[IsoReader] Using UDF path (STREAM/ @ LBA "
-              << UMD_STREAM_DIR_LBA << ")\n";
 
-    parse_metadata_dir();
-    const bool ok = parse_udf_stream_dir();
+    // Primary discovery: walk the ISO 9660 directory tree. The UMD content
+    // root and its STREAM/ sub-directory do not sit at a fixed LBA (they vary
+    // by disc: UMD_VIDEO at 23 or 24, STREAM/ at 28 or 30), so locating them
+    // from the tree is what makes the reader work across discs.
     discover_assets();
-    return ok;
+
+    // Legacy fallbacks (fixed LBAs) for images whose ISO 9660 tree is absent
+    // or unusual: STREAM/ @ LBA 28, UMD_VIDEO/ @ LBA 24.
+    if (m_entries.empty()) parse_udf_stream_dir();
+    if (m_metadata.empty()) parse_metadata_dir();
+
+    // Parse PARAM.SFO once, from wherever discovery located it.
+    for (const auto& f : m_metadata) {
+        if (f.name == "PARAM.SFO") {
+            std::vector<uint8_t> raw = read_metadata(f.name);
+            if (!raw.empty()) parse_param_sfo(raw.data(), raw.size(), m_param);
+            break;
+        }
+    }
+
+    std::cout << "[IsoReader] Metadata files found: " << m_metadata.size();
+    if (!m_param.title.empty()) std::cout << " (TITLE: \"" << m_param.title << "\")";
+    std::cout << "\n";
+
+    return !m_entries.empty();
 }
 
 // --- ISO 9660 directory traversal ---------------------------------------
@@ -139,18 +188,28 @@ void IsoReader::discover_assets() {
     }
     if (m_root == UmdRoot::None) return;
 
-    // Walk the content root and its immediate sub-directories.
+    // Walk the content root and its immediate sub-directories. STREAM/ is
+    // collected as MpsEntry (.MPS/.PMF streams); the rest as menu assets.
     auto content = list_iso_dir(content_lba, content_size);
     for (const auto& e : content) {
         if (e.is_dir) {
+            const bool is_stream = (e.name == "STREAM");
             auto sub = list_iso_dir(e.lba, e.size_bytes);
             for (const auto& s : sub) {
                 if (s.is_dir) continue;
-                m_assets.push_back({s.name, m_root_name + "/" + e.name,
-                                    s.lba, s.size_bytes});
+                if (is_stream && is_stream_file(s.name)) {
+                    m_entries.push_back({s.name, s.lba, s.size_bytes});
+                } else if (is_stream) {
+                    continue;   // non-stream files in STREAM/ are not menu assets
+                } else {
+                    m_assets.push_back({s.name, m_root_name + "/" + e.name,
+                                        s.lba, s.size_bytes});
+                }
             }
         } else {
             m_assets.push_back({e.name, m_root_name, e.lba, e.size_bytes});
+            if (is_metadata_file(e.name))
+                m_metadata.push_back({e.name, e.lba, e.size_bytes, {}});
         }
     }
 
@@ -159,6 +218,13 @@ void IsoReader::discover_assets() {
                   if (a.dir != b.dir) return a.dir < b.dir;
                   return a.name < b.name;
               });
+
+    if (!m_entries.empty()) {
+        std::sort(m_entries.begin(), m_entries.end(),
+                  [](const MpsEntry& a, const MpsEntry& b){ return a.lba < b.lba; });
+        std::cout << "[IsoReader] Successfully found " << m_entries.size()
+                  << " stream file(s)!\n";
+    }
 
     std::cout << "[IsoReader] Content root: " << m_root_name
               << "  (" << m_assets.size() << " menu asset(s))\n";
@@ -222,18 +288,7 @@ void IsoReader::parse_metadata_dir() {
         if (!found) break;
     }
 
-    // Parse PARAM.SFO eagerly so the UI can show TITLE / DISC_ID immediately.
-    for (const auto& f : m_metadata) {
-        if (f.name == "PARAM.SFO") {
-            std::vector<uint8_t> raw = read_metadata(f.name);
-            if (!raw.empty()) parse_param_sfo(raw.data(), raw.size(), m_param);
-            break;
-        }
-    }
-
-    std::cout << "[IsoReader] Metadata files found: " << m_metadata.size();
-    if (!m_param.title.empty()) std::cout << " (TITLE: \"" << m_param.title << "\")";
-    std::cout << "\n";
+    // PARAM.SFO is parsed once by open(), from wherever discovery found it.
 }
 
 bool IsoReader::has_metadata(const std::string& filename) const {
