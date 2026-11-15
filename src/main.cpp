@@ -8,6 +8,7 @@
 #include "rco_parser.h"
 #include "rco_menu.h"
 #include "rco_texture.h"
+#include "ui_sfx.h"
 #include "vsmx_vm.h"
 
 #include "stb_image_write.h"   // declarations only (impl is in stb_impl.cpp)
@@ -45,6 +46,7 @@ struct Options {
     std::string menu_page;                // --menu-page <name>: start on a page
     std::string aspect_name;             // --aspect auto|16:9|4:3|fill
     bool        verbose = false;         // --verbose: full VSMX disassembly in --probe
+    bool        no_ui_sounds = false;    // --no-ui-sounds: start with UI chimes off
 };
 
 void print_usage() {
@@ -65,7 +67,8 @@ void print_usage() {
         "  --open-chapters        open the Chapters panel (with --demo)\n"
         "  --open-menu            open the interactive .RCO Disc Menu\n"
         "  --menu-page <name>     start the Disc Menu on a named page\n"
-        "  --aspect <mode>        Zoom mode: auto|16:9|4:3|fill\n";
+        "  --aspect <mode>        Zoom mode: auto|16:9|4:3|fill\n"
+        "  --no-ui-sounds         start with WMC UI chimes muted\n";
 }
 
 bool parse_args(int argc, char** argv, Options& opt) {
@@ -104,6 +107,8 @@ bool parse_args(int argc, char** argv, Options& opt) {
             opt.menu_page = argv[++i];
         } else if (a == "--aspect" && i + 1 < argc) {
             opt.aspect_name = argv[++i];
+        } else if (a == "--no-ui-sounds") {
+            opt.no_ui_sounds = true;
         } else if (a == "-h" || a == "--help") {
             print_usage();
             return false;
@@ -485,6 +490,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Procedural WMC UI chimes (own SDL audio device; headless-safe).
+    umdplay::UiSfx ui_sfx;
+    ui_sfx.init();
+    bool ui_sounds = !opt.no_ui_sounds;
+    // UI chimes are gated by the Options switch and the player mute state.
+    auto ui_cue = [&](umdplay::UiCue cue) {
+        if (!ui_sounds) return;
+        ui_sfx.set_muted(ui.muted());
+        ui_sfx.play(cue);
+    };
+
     // Decode cover art. `recent_items` is the single owner of all textures;
     // `active` is a metadata-only copy so nothing is freed twice.
     for (auto& it : recent_items) {
@@ -759,6 +775,10 @@ int main(int argc, char** argv) {
         return true;
     };
 
+    // Welcoming chime on launch. Gated by the UI Sounds switch; on a machine
+    // with no audio device play() is a no-op, so headless demos are unaffected.
+    ui_cue(umdplay::UiCue::Startup);
+
     while (!quit) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
@@ -814,7 +834,8 @@ int main(int argc, char** argv) {
                                 strip, action_sel, extras_open, extras_sel,
                                 chapters_open, chapter_sel, setting_sel,
                                 now_playing, /*loading=*/false,
-                                ui.is_fullscreen(), ui.volume(), ui.muted(), now());
+                                ui.is_fullscreen(), ui.volume(), ui.muted(), ui_sounds, now());
+            ui_cue(in.cue);
 
             switch (in.action) {
                 case WmcAction::OpenIso:
@@ -874,6 +895,11 @@ int main(int argc, char** argv) {
                 case WmcAction::MuteToggled:
                     ui.set_muted(!ui.muted());
                     break;
+                case WmcAction::ToggleUiSounds:
+                    ui_sounds = !ui_sounds;
+                    // Audible confirmation when switching the chimes back on.
+                    if (ui_sounds) { ui_sfx.set_muted(ui.muted()); ui_sfx.play(umdplay::UiCue::Select); }
+                    break;
                 case WmcAction::Quit:
                     quit = true;
                     break;
@@ -885,6 +911,7 @@ int main(int argc, char** argv) {
         } else if (mode == Mode::DiscMenu) {
             DiscMenuResult dr = wmc.render_disc_menu(disc_menu, menu_tex,
                                                      active.disc, now());
+            ui_cue(dr.cue);
             if (dr.close) mode = decoder_open ? Mode::Player : Mode::Hub;
             if (dr.action.kind != umdplay::MenuActionKind::None) {
                 switch (dr.action.kind) {
@@ -947,7 +974,8 @@ int main(int argc, char** argv) {
                                        active.disc, sname, paused, elapsed, total, osd_visible,
                                        settings_open, setting_sel, aspect_mode, mi,
                                        ui.volume(), ui.muted(), ui.is_fullscreen(),
-                                       active.disc.has_menu && !opt.demo, menu_clicked, now());
+                                       active.disc.has_menu && !opt.demo, ui_sounds, menu_clicked, now());
+                ui_cue(in.cue);
 
                 switch (in.action) {
                     case WmcAction::TogglePause:
@@ -997,6 +1025,10 @@ int main(int argc, char** argv) {
                         break;
                     case WmcAction::MuteToggled:
                         ui.set_muted(!ui.muted());
+                        break;
+                    case WmcAction::ToggleUiSounds:
+                        ui_sounds = !ui_sounds;
+                        if (ui_sounds) { ui_sfx.set_muted(ui.muted()); ui_sfx.play(umdplay::UiCue::Select); }
                         break;
                     case WmcAction::ToggleFullscreen:
                         ui.toggle_fullscreen();
@@ -1052,6 +1084,7 @@ int main(int argc, char** argv) {
     if (pad) SDL_GameControllerClose(pad);
     av_frame_free(&video_frame);
     close_decoder();
+    ui_sfx.close();
     wmc.close();
     ui.close();
 

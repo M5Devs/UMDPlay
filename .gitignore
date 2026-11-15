@@ -1,11 +1,14 @@
 # Binaries & Builds
 build/
-build-asan/
+build-*/
 bin/
 *.o
 *.a
 *.so
 umdplay_test
+
+# Scratch artifacts (local verification outputs)
+artifacts/
 
 # Media & Dumps
 *.iso

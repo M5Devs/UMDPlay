@@ -10,6 +10,10 @@ endif()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# CI passes -DCMAKE_CXX_FLAGS="-Werror"; expose the same bar as a first-class
+# option so a local build can opt in without hand-rolling flags.
+option(UMDPLAY_WERROR "Treat project warnings as errors" OFF)
+
 include_directories(${PROJECT_SOURCE_DIR}/include)
 include_directories(${PROJECT_SOURCE_DIR}/third_party)
 
@@ -124,6 +128,20 @@ else()
     message(STATUS "UMDPlay: libavfilter not found — interlaced frames pass through")
 endif()
 target_compile_options(umdplay_core PRIVATE -Wall -Wextra -Wpedantic)
+if(UMDPLAY_WERROR)
+    target_compile_options(umdplay_core PRIVATE -Werror)
+endif()
+
+# --- Procedural WMC UI sound effects (SDL2 audio; no bundled samples) ---
+# Split into its own small library so both the player and its unit test link it
+# without dragging in the whole decoder/ImGui stack.
+add_library(umdplay_ui_sfx STATIC src/ui_sfx.cpp)
+target_include_directories(umdplay_ui_sfx PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(umdplay_ui_sfx PUBLIC ${SDL2_LIBRARIES})
+target_compile_options(umdplay_ui_sfx PRIVATE -Wall -Wextra -Wpedantic)
+if(UMDPLAY_WERROR)
+    target_compile_options(umdplay_ui_sfx PRIVATE -Werror)
+endif()
 
 # --- Player executable ---
 add_executable(umdplay
@@ -134,10 +152,13 @@ add_executable(umdplay
     src/rco_texture.cpp
 )
 target_link_libraries(umdplay PRIVATE
-    umdplay_core imgui_backends stb_image
+    umdplay_core umdplay_ui_sfx imgui_backends stb_image
     ${SDL2_LIBRARIES}
 )
 target_compile_options(umdplay PRIVATE -Wall -Wextra -Wpedantic)
+if(UMDPLAY_WERROR)
+    target_compile_options(umdplay PRIVATE -Werror)
+endif()
 
 # --- Tests ---
 enable_testing()
@@ -208,6 +229,18 @@ add_executable(test_iso_reader tests/test_iso_reader.cpp)
 target_link_libraries(test_iso_reader PRIVATE umdplay_core)
 target_compile_options(test_iso_reader PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME test_iso_reader COMMAND test_iso_reader)
+
+# Procedural UI sound synthesis: asserts every cue is non-silent, finite and
+# in-range, and exercises the SDL playback path under the dummy audio driver.
+add_executable(test_ui_sfx tests/test_ui_sfx.cpp)
+target_link_libraries(test_ui_sfx PRIVATE umdplay_ui_sfx)
+target_compile_options(test_ui_sfx PRIVATE -Wall -Wextra -Wpedantic)
+if(UMDPLAY_WERROR)
+    target_compile_options(test_ui_sfx PRIVATE -Werror)
+endif()
+add_test(NAME test_ui_sfx COMMAND test_ui_sfx)
+set_tests_properties(test_ui_sfx PROPERTIES
+    ENVIRONMENT "SDL_AUDIODRIVER=dummy")
 
 install(TARGETS umdplay DESTINATION bin)
 

@@ -9,6 +9,7 @@
 #include "gesture.h"
 #include "rco_menu.h"
 #include "rco_texture.h"
+#include "ui_sfx.h"
 
 struct ImFont;
 struct ImDrawList;
@@ -62,6 +63,7 @@ enum class HubMode {
 struct DiscMenuResult {
     umdplay::MenuAction action;   // from a button press (may be None)
     bool close = false;           // leave the menu (Esc at the top level)
+    umdplay::UiCue cue = umdplay::UiCue::None;  // UI sound to play this frame
 };
 
 // One entry in the Browse System listing (a folder or a .iso file).
@@ -126,6 +128,7 @@ enum class WmcAction {
     SetAspect,          // new zoom mode in `aspect_mode`
     VolumeChanged,      // new gain in `volume`
     MuteToggled,
+    ToggleUiSounds,     // Options: flip the UI Sounds on/off switch
     OpenDiscMenu        // open the interactive .RCO Disc Menu
 };
 
@@ -138,6 +141,7 @@ struct WmcInput {
     float     volume = 1.0f;
     std::string iso_path;
     aspect::Mode aspect_mode = aspect::Mode::Auto;
+    umdplay::UiCue cue = umdplay::UiCue::None;  // UI sound to play this frame
 };
 
 // Windows Media Center inspired 10-foot interface. A signature WMC cross-axis
@@ -174,7 +178,8 @@ public:
                         bool& chapters_open, int& chapter_sel,
                         int& setting_sel,
                         const NowPlaying& now_playing, bool loading,
-                        bool fullscreen, float volume, bool muted, float t);
+                        bool fullscreen, float volume, bool muted, bool ui_sounds,
+                        float t);
 
     // --- Player ---
     // `settings_open` is toggled by the gear button / O / Tab. `mi` feeds the
@@ -186,7 +191,8 @@ public:
                            int& setting_sel, aspect::Mode aspect_mode,
                            const PlayerMediaInfo& mi,
                            float volume, bool muted, bool fullscreen,
-                           bool has_menu, bool& menu_clicked, float t);
+                           bool has_menu, bool ui_sounds, bool& menu_clicked,
+                           float t);
 
     // Interactive Disc Menu screen: renders the active .RCO page from `menu`
     // (blitting cached `tex` textures), drives keyboard/gamepad/mouse/touch
@@ -226,7 +232,7 @@ private:
                            int browse_sel);
     void draw_settings_panel(ImDrawList* dl, float x, float y, float w,
                              int setting_sel, bool fullscreen, float volume,
-                             bool muted);
+                             bool muted, bool ui_sounds);
     void draw_now_playing_pip(ImDrawList* dl, float w, float h,
                               const NowPlaying& np, SDL_Texture* video_tex,
                               int video_w, int video_h, float t);
@@ -245,7 +251,8 @@ private:
     void draw_settings_overlay(ImDrawList* dl, float w, float h, float alpha,
                                int setting_sel, aspect::Mode aspect_mode,
                                const PlayerMediaInfo& mi, float volume,
-                               bool muted, bool fullscreen, WmcInput& out);
+                               bool muted, bool fullscreen, bool ui_sounds,
+                               WmcInput& out);
 
     // Gesture plumbing -------------------------------------------------------
     // Touch and mouse samples are queued (with their own timestamps, both in

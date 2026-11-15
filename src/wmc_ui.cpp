@@ -663,17 +663,19 @@ void WmcUi::draw_browse_panel(ImDrawList* dl, float x, float y, float w,
 
 void WmcUi::draw_settings_panel(ImDrawList* dl, float x, float y, float w,
                                 int setting_sel, bool fullscreen, float volume,
-                                bool muted) {
+                                bool muted, bool ui_sounds) {
     const float row_h = 52.0f;
     const float gap = 10.0f;
-    const char* labels[3] = {"Display Mode", "Volume", "Mute"};
-    char values[3][48];
+    const int   rows = 4;
+    const char* labels[4] = {"Display Mode", "Volume", "Mute", "UI Sounds"};
+    char values[4][48];
     std::snprintf(values[0], sizeof(values[0]), "%s", fullscreen ? "Fullscreen" : "Windowed");
     std::snprintf(values[1], sizeof(values[1]), "%d%%", static_cast<int>(volume * 100.0f + 0.5f));
     std::snprintf(values[2], sizeof(values[2]), "%s", muted ? "On" : "Off");
+    std::snprintf(values[3], sizeof(values[3]), "%s", ui_sounds ? "On" : "Off");
 
     float ry = y;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < rows; ++i) {
         const bool active = (i == setting_sel);
         const ImVec2 r0(x, ry), r1(x + w, ry + row_h);
         if (active) {
@@ -820,7 +822,8 @@ WmcInput WmcUi::render_hub(SDL_Texture* video_tex, int video_w, int video_h,
                            bool& chapters_open, int& chapter_sel,
                            int& setting_sel,
                            const NowPlaying& now_playing, bool loading,
-                           bool fullscreen, float volume, bool muted, float t) {
+                           bool fullscreen, float volume, bool muted,
+                           bool ui_sounds, float t) {
     WmcInput out;
     if (!m_imgui_ready) return out;
 
@@ -921,11 +924,11 @@ WmcInput WmcUi::render_hub(SDL_Texture* video_tex, int video_w, int video_h,
 
     // --- Focus 0: category column (keyboard) ---
     if (m_focus == 0) {
-        if (take_u() && cat_i > 0) { category = cats[--cat_i]; }
-        if (take_d() && cat_i + 1 < static_cast<int>(cats.size())) { category = cats[++cat_i]; }
+        if (take_u() && cat_i > 0) { category = cats[--cat_i]; out.cue = umdplay::UiCue::Navigate; }
+        if (take_d() && cat_i + 1 < static_cast<int>(cats.size())) { category = cats[++cat_i]; out.cue = umdplay::UiCue::Navigate; }
         if (take_r() || take_e()) {
             if (category == HubMode::NowPlaying) out.action = WmcAction::BackToPlayback;
-            else m_focus = 1;
+            else { m_focus = 1; out.cue = umdplay::UiCue::Navigate; }
         }
     }
 
@@ -979,11 +982,11 @@ WmcInput WmcUi::render_hub(SDL_Texture* video_tex, int video_w, int video_h,
                       (i == recent_sel) && on_tiles, t);
         }
         if (on_tiles) {
-            if (take_l() && recent_sel > 0) { recent_sel--; m_tile_pos = recent_sel; }
-            if (take_r() && recent_sel + 1 < static_cast<int>(recent.size())) { recent_sel++; m_tile_pos = recent_sel; }
-            if (take_e() && sel) { out.action = WmcAction::OpenIso; out.iso_path = sel->iso_path; }
-            if (take_u()) m_focus = 0;
-            if (take_d()) m_focus = 2;
+            if (take_l() && recent_sel > 0) { recent_sel--; m_tile_pos = recent_sel; out.cue = umdplay::UiCue::Navigate; }
+            if (take_r() && recent_sel + 1 < static_cast<int>(recent.size())) { recent_sel++; m_tile_pos = recent_sel; out.cue = umdplay::UiCue::Navigate; }
+            if (take_e() && sel) { out.action = WmcAction::OpenIso; out.iso_path = sel->iso_path; out.cue = umdplay::UiCue::Select; }
+            if (take_u()) { m_focus = 0; out.cue = umdplay::UiCue::Navigate; }
+            if (take_d()) { m_focus = 2; out.cue = umdplay::UiCue::Navigate; }
         }
     } else if (category == HubMode::Browse) {
         for (int i = 0; i < static_cast<int>(browse.size()); ++i) {
@@ -995,16 +998,16 @@ WmcInput WmcUi::render_hub(SDL_Texture* video_tex, int video_w, int video_h,
                              (i == browse_sel) && on_tiles, t);
         }
         if (on_tiles) {
-            if (take_l() && browse_sel > 0) { browse_sel--; m_tile_pos = browse_sel; }
-            if (take_r() && browse_sel + 1 < static_cast<int>(browse.size())) { browse_sel++; m_tile_pos = browse_sel; }
+            if (take_l() && browse_sel > 0) { browse_sel--; m_tile_pos = browse_sel; out.cue = umdplay::UiCue::Navigate; }
+            if (take_r() && browse_sel + 1 < static_cast<int>(browse.size())) { browse_sel++; m_tile_pos = browse_sel; out.cue = umdplay::UiCue::Navigate; }
             if (take_e() && browse_sel >= 0 && browse_sel < static_cast<int>(browse.size())) {
                 const BrowseEntry& e = browse[browse_sel];
-                if (e.is_dir) { out.action = WmcAction::BrowseEnter; out.iso_path = e.path; }
-                else if (e.is_iso) { out.action = WmcAction::OpenIso; out.iso_path = e.path; }
+                if (e.is_dir) { out.action = WmcAction::BrowseEnter; out.iso_path = e.path; out.cue = umdplay::UiCue::Select; }
+                else if (e.is_iso) { out.action = WmcAction::OpenIso; out.iso_path = e.path; out.cue = umdplay::UiCue::Select; }
             }
-            if (ImGui::IsKeyPressed(ImGuiKey_Backspace, true)) out.action = WmcAction::BrowseUp;
-            if (take_u()) m_focus = 0;
-            if (take_d()) m_focus = 2;
+            if (ImGui::IsKeyPressed(ImGuiKey_Backspace, true)) { out.action = WmcAction::BrowseUp; out.cue = umdplay::UiCue::Back; }
+            if (take_u()) { m_focus = 0; out.cue = umdplay::UiCue::Navigate; }
+            if (take_d()) { m_focus = 2; out.cue = umdplay::UiCue::Navigate; }
         }
     }
 
@@ -1038,18 +1041,19 @@ WmcInput WmcUi::render_hub(SDL_Texture* video_tex, int video_w, int video_h,
             if (m_focus == 2) {
                 if (chapters_open && chapters > 0) {
                     chapter_sel = std::clamp(chapter_sel, 0, chapters - 1);
-                    if (take_u() && chapter_sel > 0) chapter_sel--;
-                    if (take_d() && chapter_sel + 1 < chapters) chapter_sel++;
-                    if (take_l() || take_r()) chapters_open = false;
+                    if (take_u() && chapter_sel > 0) { chapter_sel--; out.cue = umdplay::UiCue::Navigate; }
+                    if (take_d() && chapter_sel + 1 < chapters) { chapter_sel++; out.cue = umdplay::UiCue::Navigate; }
+                    if (take_l() || take_r()) { chapters_open = false; out.cue = umdplay::UiCue::Back; }
                     if (take_e()) {
                         out.action = WmcAction::PlayChapter;
                         out.chapter_index = chapter_sel;
+                        out.cue = umdplay::UiCue::Select;
                     }
-                    if (ImGui::IsKeyPressed(ImGuiKey_Escape, true)) chapters_open = false;
+                    if (ImGui::IsKeyPressed(ImGuiKey_Escape, true)) { chapters_open = false; out.cue = umdplay::UiCue::Back; }
                 } else if (extras_open && bonus > 0) {
-                    if (take_u() && extras_sel > 0) extras_sel--;
-                    if (take_d() && extras_sel + 1 < bonus) extras_sel++;
-                    if (take_l() || take_r()) extras_open = false;
+                    if (take_u() && extras_sel > 0) { extras_sel--; out.cue = umdplay::UiCue::Navigate; }
+                    if (take_d() && extras_sel + 1 < bonus) { extras_sel++; out.cue = umdplay::UiCue::Navigate; }
+                    if (take_l() || take_r()) { extras_open = false; out.cue = umdplay::UiCue::Back; }
                     if (take_e()) {
                         int b = 0;
                         for (int i = 0; i < static_cast<int>(sel->streams.size()); ++i) {
@@ -1057,16 +1061,18 @@ WmcInput WmcUi::render_hub(SDL_Texture* video_tex, int video_w, int video_h,
                             if (b == extras_sel) { out.action = WmcAction::PlayStream; out.stream_index = i; break; }
                             ++b;
                         }
+                        out.cue = umdplay::UiCue::Select;
                     }
-                    if (ImGui::IsKeyPressed(ImGuiKey_Escape, true)) extras_open = false;
+                    if (ImGui::IsKeyPressed(ImGuiKey_Escape, true)) { extras_open = false; out.cue = umdplay::UiCue::Back; }
                 } else {
-                    if (take_u()) { if (action_sel > 0) action_sel--; else m_focus = 1; }
-                    if (take_d() && action_sel + 1 < nrows) action_sel++;
+                    if (take_u()) { if (action_sel > 0) { action_sel--; out.cue = umdplay::UiCue::Navigate; } else { m_focus = 1; out.cue = umdplay::UiCue::Navigate; } }
+                    if (take_d() && action_sel + 1 < nrows) { action_sel++; out.cue = umdplay::UiCue::Navigate; }
                     if (take_e()) {
                         if (action_sel == 0) out.action = WmcAction::Play;
                         else if (action_sel == options_idx) category = HubMode::Settings;
                         else if (action_sel == chapters_idx) { chapters_open = true; chapter_sel = 0; }
                         else if (action_sel == extras_idx) { extras_open = true; extras_sel = 0; }
+                        out.cue = umdplay::UiCue::Select;
                     }
                 }
             }
@@ -1081,14 +1087,14 @@ WmcInput WmcUi::render_hub(SDL_Texture* video_tex, int video_w, int video_h,
         const float bh = std::min(panel_top - panel_y, 8 * 34.0f + 16.0f);
         if (bh > 80.0f) {
             draw_browse_panel(dl, panel_x, panel_y, panel_w, browse_path, browse, browse_sel);
-            if (m_focus == 2 && take_u()) m_focus = 1;
+            if (m_focus == 2 && take_u()) { m_focus = 1; out.cue = umdplay::UiCue::Navigate; }
         }
     } else if (category == HubMode::Settings) {
-        const float sh = std::min(panel_top - panel_y, 3 * 62.0f + 10.0f);
+        const float sh = std::min(panel_top - panel_y, 4 * 62.0f + 10.0f);
         if (sh > 80.0f) {
             if (m_focus == 2) {
-                if (take_u()) { if (setting_sel > 0) setting_sel--; else m_focus = 1; }
-                if (take_d() && setting_sel < 2) setting_sel++;
+                if (take_u()) { if (setting_sel > 0) { setting_sel--; out.cue = umdplay::UiCue::Navigate; } else m_focus = 1; }
+                if (take_d() && setting_sel < 3) { setting_sel++; out.cue = umdplay::UiCue::Navigate; }
                 const bool sl = take_l();
                 const bool sr = take_r();
                 if (sl || sr) {
@@ -1096,15 +1102,19 @@ WmcInput WmcUi::render_hub(SDL_Texture* video_tex, int video_w, int video_h,
                     else if (setting_sel == 1) {
                         out.action = WmcAction::VolumeChanged;
                         out.volume = std::clamp(volume + (sr ? 0.05f : -0.05f), 0.0f, 1.0f);
-                    } else out.action = WmcAction::MuteToggled;
+                    } else if (setting_sel == 2) out.action = WmcAction::MuteToggled;
+                    else out.action = WmcAction::ToggleUiSounds;
+                    if (out.cue == umdplay::UiCue::None) out.cue = umdplay::UiCue::Navigate;
                 }
                 if (take_e()) {
                     if (setting_sel == 0) out.action = WmcAction::ToggleFullscreen;
                     else if (setting_sel == 2) out.action = WmcAction::MuteToggled;
+                    else if (setting_sel == 3) out.action = WmcAction::ToggleUiSounds;
+                    if (out.cue == umdplay::UiCue::None) out.cue = umdplay::UiCue::Select;
                 }
             }
             draw_settings_panel(dl, panel_x, panel_y, panel_w, setting_sel,
-                                fullscreen, volume, muted);
+                                fullscreen, volume, muted, ui_sounds);
         }
     }
     dl->PopClipRect();
@@ -1450,7 +1460,8 @@ bool WmcUi::draw_osd(ImDrawList* dl, float w, float h, float alpha,
 void WmcUi::draw_settings_overlay(ImDrawList* dl, float w, float h, float alpha,
                                   int setting_sel, aspect::Mode aspect_mode,
                                   const PlayerMediaInfo& mi, float volume,
-                                  bool muted, bool fullscreen, WmcInput& out) {
+                                  bool muted, bool fullscreen, bool ui_sounds,
+                                  WmcInput& out) {
     const float pw = 460.0f;
     const ImVec2 p0(w - pw - 36.0f, 90.0f);
     const ImVec2 p1(w - 36.0f, h - 96.0f);
@@ -1486,6 +1497,7 @@ void WmcUi::draw_settings_overlay(ImDrawList* dl, float w, float h, float alpha,
     std::snprintf(v, sizeof(v), "%d%%%s", static_cast<int>(volume * 100.0f + 0.5f), muted ? " (muted)" : "");
     row(2, "Audio Volume", v, setting_sel == 2);
     row(3, "Display", fullscreen ? "Fullscreen" : "Windowed", setting_sel == 3);
+    row(4, "UI Sounds", ui_sounds ? "On" : "Off", setting_sel == 4);
 
     // --- Media Info readout ---
     dl->AddLine(ImVec2(p0.x + 22, ry + 4), ImVec2(p1.x - 22, ry + 4),
@@ -1521,8 +1533,8 @@ void WmcUi::draw_settings_overlay(ImDrawList* dl, float w, float h, float alpha,
     }
 
     // Interaction: left/right and Enter change the focused setting.
-    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true) && setting_sel > 0) --setting_sel;
-    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true) && setting_sel < 3) ++setting_sel;
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true) && setting_sel > 0) { --setting_sel; out.cue = umdplay::UiCue::Navigate; }
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true) && setting_sel < 4) { ++setting_sel; out.cue = umdplay::UiCue::Navigate; }
     const bool left = ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true);
     const bool right = ImGui::IsKeyPressed(ImGuiKey_RightArrow, true);
     const bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter, true);
@@ -1539,7 +1551,9 @@ void WmcUi::draw_settings_overlay(ImDrawList* dl, float w, float h, float alpha,
                        out.volume = std::clamp(volume + (right ? 0.05f : -0.05f), 0.0f, 1.0f); }
                 break;
             case 3: out.action = WmcAction::ToggleFullscreen; break;
+            case 4: out.action = WmcAction::ToggleUiSounds; break;
         }
+        out.cue = enter ? umdplay::UiCue::Select : umdplay::UiCue::Navigate;
     }
 }
 
@@ -1553,7 +1567,8 @@ WmcInput WmcUi::render_player(SDL_Texture* video_tex, int video_w, int video_h,
                               int& setting_sel, aspect::Mode aspect_mode,
                               const PlayerMediaInfo& mi,
                               float volume, bool muted, bool fullscreen,
-                              bool has_menu, bool& menu_clicked, float t) {
+                              bool has_menu, bool ui_sounds, bool& menu_clicked,
+                              float t) {
     menu_clicked = false;
     WmcInput out;
     if (!m_imgui_ready) return out;
@@ -1637,10 +1652,12 @@ WmcInput WmcUi::render_player(SDL_Texture* video_tex, int video_w, int video_h,
         setting_sel = 0;
         osd_visible = true;
         m_last_input_time = t;
+        out.cue = umdplay::UiCue::Navigate;
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, true)) {
         if (settings_open) settings_open = false;
         else out.action = WmcAction::Stop;
+        out.cue = umdplay::UiCue::Back;
     }
 
     // --- Gestures ---
@@ -1693,12 +1710,12 @@ WmcInput WmcUi::render_player(SDL_Texture* video_tex, int video_w, int video_h,
                                     volume, muted, fullscreen, settings_open,
                                     mi.chapter, mi.chapter_count, has_menu,
                                     gear_clicked, menu_clicked, out);
-    if (gear_clicked) { settings_open = !settings_open; setting_sel = 0; osd_visible = true; m_last_input_time = t; }
-    if (menu_clicked) { out.action = WmcAction::OpenDiscMenu; osd_visible = false; }
+    if (gear_clicked) { settings_open = !settings_open; setting_sel = 0; osd_visible = true; m_last_input_time = t; out.cue = umdplay::UiCue::Navigate; }
+    if (menu_clicked) { out.action = WmcAction::OpenDiscMenu; osd_visible = false; out.cue = umdplay::UiCue::Select; }
 
     // --- Settings overlay (keeps playback running) ---
     if (settings_open) draw_settings_overlay(dl, w, h, 1.0f, setting_sel, aspect_mode,
-                                             mi, volume, muted, fullscreen, out);
+                                             mi, volume, muted, fullscreen, ui_sounds, out);
 
     // --- Gesture HUDs, fading out ---
     m_scrub_hud = std::max(0.0f, m_scrub_hud - io.DeltaTime * 1.6f);
@@ -1834,26 +1851,29 @@ DiscMenuResult WmcUi::render_disc_menu(umdplay::RcoMenu& menu,
 
     // --- Input -------------------------------------------------------------
     auto take_key = [&](ImGuiKey k) { return ImGui::IsKeyPressed(k, true); };
-    if (take_key(ImGuiKey_LeftArrow))  menu.move_focus(-1, 0);
-    if (take_key(ImGuiKey_RightArrow)) menu.move_focus(1, 0);
-    if (take_key(ImGuiKey_UpArrow))    menu.move_focus(0, -1);
-    if (take_key(ImGuiKey_DownArrow))  menu.move_focus(0, 1);
+    if (take_key(ImGuiKey_LeftArrow))  { menu.move_focus(-1, 0); res.cue = umdplay::UiCue::Navigate; }
+    if (take_key(ImGuiKey_RightArrow)) { menu.move_focus(1, 0);  res.cue = umdplay::UiCue::Navigate; }
+    if (take_key(ImGuiKey_UpArrow))    { menu.move_focus(0, -1); res.cue = umdplay::UiCue::Navigate; }
+    if (take_key(ImGuiKey_DownArrow))  { menu.move_focus(0, 1);  res.cue = umdplay::UiCue::Navigate; }
 
     bool activated = false;
     if (take_key(ImGuiKey_Enter) || take_key(ImGuiKey_Space) ||
         take_key(ImGuiKey_KeypadEnter)) {
         res.action = menu.activate_focused();
         activated = true;
+        res.cue = umdplay::UiCue::Select;
     }
     // Mouse click / touch tap on a button.
     if (ImGui::IsMouseClicked(0) && hovered) {
         res.action = menu.activate_at((mp.x - px) / panel_w, (mp.y - py) / panel_h);
         activated = true;
+        res.cue = umdplay::UiCue::Select;
     }
     if (take_key(ImGuiKey_Escape) || take_key(ImGuiKey_Backspace)) {
         umdplay::MenuAction back = menu.back();
         if (back.kind == umdplay::MenuActionKind::ExitMenu) res.close = true;
         else res.action = back;
+        res.cue = umdplay::UiCue::Back;
     }
 
     // After a press, let the disc's own onMenu state machine act (it may ask
