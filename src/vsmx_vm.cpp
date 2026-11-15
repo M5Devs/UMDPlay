@@ -316,6 +316,10 @@ struct VsmxMachine::Impl {
         std::vector<VsmxValue> locals;   // index 1..n hold the arguments
         size_t return_pc = 0;
         bool   return_this = false;
+        // Value-stack depth when the frame was entered. END_STMT may only drop
+        // values the current frame pushed; the caller's pending operands (e.g.
+        // the assignment target saved across a `new Player()`) sit below this.
+        size_t stack_base = 0;
     };
     std::vector<Frame> frames;
     size_t pc = 0;
@@ -405,6 +409,7 @@ struct VsmxMachine::Impl {
             fr.locals[i + 1] = args[i];
         fr.return_pc = pc;
         fr.return_this = return_this;
+        fr.stack_base = stack.size();
         frames.push_back(std::move(fr));
         if (fn->start_line >= 0 &&
             fn->start_line < static_cast<int>(prog.code.size()))
@@ -675,7 +680,11 @@ void VsmxMachine::Impl::execute() {
                 std::swap(stack[stack.size() - 1], stack[stack.size() - 2]);
                 break;
             case VSMX_END_STMT:
-                stack.clear();
+                // Drop only the values the current frame pushed. Clearing the
+                // whole stack would discard the caller's pending operands when
+                // this statement sits inside a function call.
+                if (stack.size() > (frames.empty() ? 0 : frames.back().stack_base))
+                    stack.resize(frames.empty() ? 0 : frames.back().stack_base);
                 break;
 
             case VSMX_CONST_NULL:
@@ -885,6 +894,9 @@ void VsmxMachine::Impl::execute() {
                 if (frames.empty()) { finished = true; break; }
                 Frame fr = frames.back();
                 frames.pop_back();
+                // Discard any statement leftovers above the caller's operands so
+                // only the return value lands on top of them.
+                if (stack.size() > fr.stack_base) stack.resize(fr.stack_base);
                 stack.push_back(fr.return_this ? VsmxValue::object(fr.this_obj)
                                                : v);
                 pc = fr.return_pc;

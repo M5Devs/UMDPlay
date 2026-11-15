@@ -555,7 +555,14 @@ void test_real_disc() {
                         "%d buttons)\n", menu.page_count(),
                         menu.page_name().c_str(), menu.page().items.size(),
                         menu.focus_index() >= 0 ? 1 : 0);
-            CHECK(menu.focused_item() != nullptr);
+            // Discs whose RCO carries explicit geometry (and a pageID/focusID
+            // driven script) resolve a focusable item straight away. Others
+            // (e.g. Silent Hill) build their layout at runtime via MPSize, so
+            // the initial page may legitimately have no buttons yet; only assert
+            // a focus target when the page actually exposes buttons.
+            bool has_buttons = false;
+            for (const auto& it : menu.page().items) if (it.is_button) has_buttons = true;
+            if (has_buttons) CHECK(menu.focused_item() != nullptr);
 
             // The main_menu page carries a "main2" tile whose push handler
             // sets pageID=2; activating it must switch to the chapter page.

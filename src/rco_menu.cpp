@@ -190,9 +190,12 @@ void RcoMenu::rebuild_page() {
         it.is_button = o.is_button() && !o.on_push_event.empty();
         it.image_offset = o.image_offset;
         // Selected-state art uses the "<image name>_sel" naming convention.
+        float img_w = 0, img_h = 0;
         if (o.image_offset != 0xFFFFFFFF) {
             for (const auto& im : m_rco.images) {
                 if (im.entry_offset == o.image_offset) {
+                    img_w = static_cast<float>(im.width);
+                    img_h = static_cast<float>(im.height);
                     const std::string sel = im.name + "_sel";
                     for (const auto& im2 : m_rco.images)
                         if (im2.name == sel) it.image_sel_offset = im2.entry_offset;
@@ -203,7 +206,12 @@ void RcoMenu::rebuild_page() {
         it.red = o.red; it.green = o.green; it.blue = o.blue; it.alpha = o.alpha;
         it.on_push_event = o.on_push_event;
         // Centre-origin, Y-up object space -> normalised screen space (Y down).
-        const float w = o.width * o.scale_w, h = o.height * o.scale_h;
+        // When the object carries no explicit geometry the RCO renders the image
+        // at its natural size (the script drives sizing via MPSize.setSize), so
+        // fall back to the referenced image's pixel dimensions.
+        float w = o.width * o.scale_w, h = o.height * o.scale_h;
+        if (w <= 0 && img_w > 0) w = img_w * o.scale_w;
+        if (h <= 0 && img_h > 0) h = img_h * o.scale_h;
         const float left   = (o.pos_x - w * 0.5f + cx) / kMenuDesignW;
         const float top    = (cy - (o.pos_y + h * 0.5f)) / kMenuDesignH;
         const float right  = (o.pos_x + w * 0.5f + cx) / kMenuDesignW;
