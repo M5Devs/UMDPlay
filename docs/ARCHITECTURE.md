@@ -1,5 +1,49 @@
 # UMDPlay — Architecture Notes
 
+This document records what UMDPlay has **reverse-engineered and verified** about
+UMD disc internals, plus the design of the parsers that read them. Everything
+below was confirmed against real discs (a Japanese UMD Video concert disc and a
+US UMD Video film) unless marked otherwise.
+
+> Compressing a UMD ISO to a `.chd`? See the dedicated
+> [CHD Compression Guide](CHD_GUIDE.md) — using the wrong `chdman` mode silently
+> breaks the disc.
+
+---
+
+## UMD Disc Families
+
+A UMD is a **1.8 GB optical disc** that can carry several kinds of content. The
+PSP XMB (and UMDPlay) distinguish them by the disc's `PARAM.SFO` `CATEGORY` code
+and by which content tree exists at the volume root. The standard PSP category
+codes are:
+
+| CATEGORY | Disc type | Root tree | Contents |
+|---|---|---|---|
+| `UV` | **UMD Video** | `UMD_VIDEO/` | Movie/TV `.MPS` streams, `PLAYLIST.UMD`, `.RCO` menus |
+| `UA` | **UMD Audio** (UMD Music) | `UMD_AUDIO/` | Audio tracks + a `PLAYLIST.UMD` track list (`UMDA0088`) |
+| `UG` | **UMD Game** | `PSP_GAME/` | PSP game `EBOOT.BIN` + `PSP_GAME/PARAM.SFO` |
+| `MG` | Memory Stick Game | `PSP_GAME/` | Game installed on a Memory Stick (no UMD) |
+
+(Not every disc ships a `CATEGORY` key — the reference UMD Video disc carries
+only `TITLE`. UMDPlay therefore keys off the content tree, not the category.)
+
+**UMD Video** is the primary target of this project: it uses the
+`UMD_VIDEO/` tree (`STREAM/`, `CLIPINF/`, `PLAYLIST.UMD`, `RESOURCE/`).
+
+### UMD-PG (interactive "player's game")
+
+**UMD-PG** is a rare variant used for interactive visual novels/eroge released
+on UMD. Despite behaving like a game, a UMD-PG disc **is a UMD Video disc**: it
+carries a `UMD_VIDEO/` tree and presents as `CATEGORY UV`, which is exactly why
+it exists — it avoids the *video game* age-rating bodies (CERO/ESRB) by shipping
+as a "video" rather than a game. Its interactivity is delivered by the disc's
+own **`PLAYLIST.UMD` + `.RCO`/VSMX menu system** (the same machinery a normal
+UMD Video menu uses), not by a `PSP_GAME/EBOOT.BIN` executable, and it keeps no
+save data. So the UMD Video parser in this project covers UMD-PG discs as well.
+
+---
+
 ## UMD Video ISO Layout (Verified)
 
 UMD Video discs use **UDF 1.02** overlaid with an ISO 9660 compatibility table.
@@ -22,6 +66,36 @@ LBA 2880      : 00001.MPS          (Main Feature — 1.72 GB, Pack Start: 00 00 
 ```
 
 Verified against: *Miku no Hi 39's Giving Day — Project DIVA [UMD VIDEO]*
+
+---
+
+## Disc Metadata (`PARAM.SFO`)
+
+The volume root carries a Sony **SFO** ("System File Object") metadata block,
+`PARAM.SFO`, used by the PSP XMB to display and categorise the disc. The format
+is little-endian with the magic `\0PSF`:
+
+```text
+Offset  Size  Field
+0x00    4     Magic "\0PSF"
+0x04    4     Version (0x00000101)
+0x08    4     Absolute offset of the key table
+0x0C    4     Absolute offset of the data table
+0x10    4     Entry count (index table entries)
+0x14    N*16  Index table: key offset(u16) fmt(u16) len(u32) max_len(u32) data offset(u32)
+...           Key table: NUL-terminated ASCII keys, alphabetical
+...           Data table: values, indexed by the entries above
+```
+
+Field formats: `0x0402` = NUL-terminated UTF-8, `0x0404` = little-endian
+`uint32`, `0x0004` = raw bytes. UMDPlay reads `TITLE`, `DISC_ID`, `CATEGORY`
+and `APP_VER`; the `CATEGORY` value is what identifies the disc family (see
+[UMD Disc Families](#umd-disc-families)). `include/param_sfo.h` /
+`src/param_sfo.cpp` implement a bounds-checked `parse_param_sfo()` that never
+reads past the buffer and returns empty fields on a malformed block.
+
+The disc's cover art lives alongside it as `ICON0.PNG` (hub cover) and
+`PIC1.PNG` (background), decoded with `stb_image`.
 
 ---
 
@@ -100,6 +174,18 @@ The elementary ATRAC3plus stream can be fed into FFmpeg's `atrac3p` decoder by w
 - **Channels:** 2 (Stereo)
 - **Samples Per Block:** 2,048
 
+### 4. Frame Stride Is Measured, Not Assumed
+The **frame stride** (bytes per ATRAC3+ frame) depends on the encoded bitrate and
+is **measured from the stream** by histogramming the spacing between successive
+`0F D0 48 55` sync words, rather than hard-coded. On both reference discs it is
+**696 bytes**, but a disc with a different bitrate/frame size still demuxes
+correctly; 696 is only the fallback for a stream too short to probe.
+
+The hand-written demuxer lives in `src/decoder.cpp` (the `psmf_*` helpers); it
+scans `0xBD` PES packets, strips the sub-header and the 8-byte frame prefix, and
+feeds the elementary ATRAC3+ stream to FFmpeg's `atrac3p` decoder. On seek it
+re-anchors on a real MPEG-PS pack boundary so audio and video stay in sync.
+
 ---
 
 ## Clip Information (.CLP)
@@ -173,6 +259,30 @@ images** (buttons/labels for the menu) and a **`VSMX`** bytecode block (the
 menu's script VM). `include/rco_parser.h` / `src/rco_parser.cpp` probe the
 header/TOC, enumerate the PNGs (with dimensions), and report the `VSMX` offset.
 
+### VSMX Bytecode (menu script VM)
+
+`VSMX` is the bytecode **virtual machine** that drives UMD Video (and PSP)
+interactive menus. The program is embedded in the `.RCO` container and controls
+page switching, focus movement, chapter playback and controller/play-status
+queries — the same machinery UMD-PG titles rely on.
+
+- The program is a flat array of **8-byte groups** `{ id:u32, value:u32 }`. The
+  **low byte of `id` is the opcode**; the remaining bytes carry small operands
+  (e.g. the argument/local counts of a `FUNCTION` group).
+- It is a **stack VM** (JavaScript-like): ~0x4A opcodes covering arithmetic,
+  comparison, bitwise ops, constants (`CONST_INT`/`CONST_STRING`/…), properties
+  and method calls, arrays, and jumps/calls.
+- **Menu host objects** are registered by name (`controller`, `movieplayer`,
+  `resource`, `system`, …). The machine is host-agnostic: the front-end provides
+  native objects and drives the top-level script.
+
+`include/vsmx_vm.h` / `src/vsmx_vm.cpp` provide three layers: `decode_vsmx()`
+(split a raw blob into code + string tables), `disassemble()` (readable
+listing), and `VsmxMachine` (a dependency-free interpreter for the subset real
+menus use). On the reference disc, `JA100000.RCO` holds a **2674-instruction**
+VSMX program across 5 pages; `RcoMenu` (`include/rco_menu.h`) runs it to drive
+real menu navigation. See the Disc Menu section of `README.md` for the UX.
+
 ---
 
 ## Phase Roadmap
@@ -182,5 +292,6 @@ header/TOC, enumerate the PNGs (with dimensions), and report the `VSMX` offset.
 | 1 | ✅ Done | UDF ISO parser — locate & read .MPS stream sectors |
 | 2 | ✅ Done | FFmpeg custom AVIO streaming + H.264 video decoding + ATRAC3+ PSMF audio reverse-engineering |
 | 3 | ✅ Done | Standalone SDL2 + ImGui GUI player with synced A/V playback |
-| 4 | 🔄 In progress | Interactive menus & chapters — PLAYLIST.UMD / CLPI0088 / `.RCO` parsing (done), real chapter navigation (done), `.VBO` / VSMX menu VM (planned) |
+| 4 | ✅ Done | Interactive menus & chapters — `PLAYLIST.UMD` / `CLPI0088` parsing, real chapter navigation, `.RCO` object tree + VSMX menu VM |
+| 4.5 | ✅ Done | Unified `DiscReader` (ISO + CHD via libchdr) — see [CHD_GUIDE.md](CHD_GUIDE.md) |
 | 5 | ⏳ Planned | PPSSPP integration API |

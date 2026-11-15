@@ -24,7 +24,7 @@ UMD Video discs use a specific filesystem structure rooted in the `UMD_VIDEO/` d
 - **ATRAC3plus** audio formats packed inside proprietary Sony **Private Stream 1 (`0xBD`)**
 - Interactive menu overlays built on **`.RCO` / `.VBO`** assets
 
-**UMDPlay** bridges this gap by decoding streams directly in memory via FFmpeg `AVIOContext`, eliminating the need for multi-gigabyte disk extraction. Disc images are opened through a small `DiscReader` abstraction, so both raw **`.iso`** and compressed **`.chd`** (MAME Compressed Hunks of Data) files work identically.
+**UMDPlay** bridges this gap by decoding streams directly in memory via FFmpeg `AVIOContext`, eliminating the need for multi-gigabyte disk extraction. Disc images are opened through a small `DiscReader` abstraction, so both raw **`.iso`** and compressed **`.chd`** (MAME Compressed Hunks of Data) files work identically — see the [CHD Compression Guide](docs/CHD_GUIDE.md) before you compress anything.
 
 ---
 
@@ -230,6 +230,33 @@ isolated config dir).
 |:---:|:---:|
 | ![Miku](screenshots/miku1.png) | ![Family Guy](screenshots/fg1.png) |
 | *Japanese UMD Video (Concert)* | *US Commercial UMD Video (Hollywood)* |
+
+---
+
+## 📚 Documentation
+
+| Document | Contents |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Reverse-engineered UMD disc internals — UDF layout, `PARAM.SFO`, `PLAYLIST.UMD` (`UMDV0088`), `CLPI0088`, `.RCO` (`\0PRF`) + VSMX bytecode, and the Sony PSMF ATRAC3+ (`0xBD`) framing |
+| [`docs/CHD_GUIDE.md`](docs/CHD_GUIDE.md) | **Safe** UMD ISO → CHD compression: sector specs, the exact `chdman createdvd` command, verifying, and restoring |
+
+### Compressing a UMD ISO to CHD (quick version)
+
+A UMD is a **2048-byte-sector, single-track, DVD-style** disc (~1.8 GB), so it
+must be compressed in **DVD mode**. Use `createdvd` — **never** `createcd`
+(which assumes 2352-byte CD sectors and silently breaks the image):
+
+```bash
+chdman createdvd -i movie.iso -o movie.chd    # ✅ correct for UMD
+chdman verify   -i movie.chd                  # confirm the copy is intact
+chdman extractdvd -i movie.chd -o movie.iso   # lossless restore, byte-identical
+
+# ❌ chdman createcd -i movie.iso -o movie.chd  (2352-byte CD mode — do not use)
+```
+
+If `chdman info -i movie.chd` reports `Unit Size: 2048` you did it right; a
+`Unit Size: 2448` means you used `createcd`. Full details, including why it
+matters, are in the [CHD Compression Guide](docs/CHD_GUIDE.md).
 
 ---
 
