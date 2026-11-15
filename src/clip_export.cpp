@@ -1,11 +1,17 @@
 #include "clip_export.h"
 #include "decoder.h"
 
+#if defined(_WIN32)
+#include <process.h>   // _spawnvp / _P_WAIT
+#else
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -15,13 +21,32 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+namespace fs = std::filesystem;
+
 namespace {
 
+// Scratch directory for the raw intermediates. /tmp does not exist on Windows;
+// the OS temp directory is correct on both platforms.
+std::string temp_dir() {
+    std::error_code ec;
+    fs::path p = fs::temp_directory_path(ec);
+    if (ec || p.empty()) return ".";
+    return p.string();
+}
+
+// Per-process id, so two concurrent umdplay runs never share a scratch file.
+unsigned long process_id() {
+#if defined(_WIN32)
+    return static_cast<unsigned long>(::_getpid());
+#else
+    return static_cast<unsigned long>(::getpid());
+#endif
+}
+
 std::string temp_path(const std::string& tag) {
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "/tmp/umdplay_%s_%d.raw", tag.c_str(),
-                  static_cast<int>(getpid()));
-    return buf;
+    const std::string stem =
+        "umdplay_" + tag + "_" + std::to_string(process_id());
+    return (fs::path(temp_dir()) / (stem + ".raw")).string();
 }
 
 bool run_ffmpeg(const std::string& out_path, int vw, int vh, double fps,
@@ -32,30 +57,37 @@ bool run_ffmpeg(const std::string& out_path, int vw, int vh, double fps,
     std::snprintf(dur_buf, sizeof(dur_buf), "%f", duration);
     std::snprintf(size_buf, sizeof(size_buf), "%dx%d", vw, vh);
 
+    const char* argv[] = {
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "rawvideo", "-pixel_format", "rgb24",
+        "-video_size", size_buf, "-framerate", fps_buf,
+        "-i", video_raw.c_str(),
+        "-f", "s16le", "-ar", "44100", "-ac", "2",
+        "-i", audio_raw.c_str(),
+        "-t", dur_buf,
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        out_path.c_str(),
+        nullptr
+    };
+
+#if defined(_WIN32)
+    // No fork/exec on Windows: spawn ffmpeg and wait for it to exit.
+    const intptr_t rc = _spawnvp(_P_WAIT, "ffmpeg", argv);
+    return rc == 0;
+#else
     const pid_t pid = fork();
     if (pid < 0) return false;
     if (pid == 0) {
-        const char* argv[] = {
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "rawvideo", "-pixel_format", "rgb24",
-            "-video_size", size_buf, "-framerate", fps_buf,
-            "-i", video_raw.c_str(),
-            "-f", "s16le", "-ar", "44100", "-ac", "2",
-            "-i", audio_raw.c_str(),
-            "-t", dur_buf,
-            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart",
-            out_path.c_str(),
-            nullptr
-        };
         execvp("ffmpeg", const_cast<char* const*>(argv));
         _exit(127);
     }
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) return false;
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+#endif
 }
 
 }  // namespace

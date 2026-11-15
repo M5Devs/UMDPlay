@@ -19,9 +19,32 @@ option(UMDPLAY_WERROR "Treat project warnings as errors" OFF)
 # for the system-library leak suppressions (SDL2/dbus, Mesa/llvmpipe).
 option(UMDPLAY_SANITIZE "Build with ASan + UBSan (+ LSan)" OFF)
 
+# Project warning bar, selected per compiler so the build is clean under GCC,
+# Clang, MinGW and MSVC alike. Third-party code is silenced separately so
+# vendored sources never fail the project's -Werror.
+if(MSVC)
+    set(UMDPLAY_WARN_FLAGS /W4)
+    if(UMDPLAY_WERROR)
+        list(APPEND UMDPLAY_WARN_FLAGS /WX)
+    endif()
+    set(UMDPLAY_THIRDPARTY_WARN_FLAGS /w)
+else()
+    set(UMDPLAY_WARN_FLAGS -Wall -Wextra -Wpedantic)
+    if(UMDPLAY_WERROR)
+        list(APPEND UMDPLAY_WARN_FLAGS -Werror)
+    endif()
+    set(UMDPLAY_THIRDPARTY_WARN_FLAGS -w)
+endif()
+
 if(UMDPLAY_SANITIZE)
-    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
-    add_link_options(-fsanitize=address,undefined)
+    if(MSVC)
+        # MSVC only implements ASan (no UBSan); enable what it has.
+        add_compile_options(/fsanitize=address)
+        add_link_options(/fsanitize=address)
+    else()
+        add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+        add_link_options(-fsanitize=address,undefined)
+    endif()
 endif()
 
 include_directories(${PROJECT_SOURCE_DIR}/include)
@@ -70,7 +93,7 @@ target_include_directories(imgui_backends PUBLIC
     ${SDL2_INCLUDE_DIRS}
 )
 target_link_libraries(imgui_backends PUBLIC ${SDL2_LIBRARIES})
-target_compile_options(imgui_backends PRIVATE -w)   # third-party: silence its warnings
+target_compile_options(imgui_backends PRIVATE ${UMDPLAY_THIRDPARTY_WARN_FLAGS})   # third-party: silence its warnings
 
 # --- libchdr (Compressed Hunks of Data; fetched & pinned) ---
 # libchdr is a C library with vendored lzma/miniz/zstd under deps/. It is
@@ -100,8 +123,12 @@ FetchContent_MakeAvailable(chdr)
 # test. Both flags are harmless in a normal (non-sanitizer) build.
 foreach(_chdr_tgt chdr-static miniz zstd chdr-lzma)
     if(TARGET ${_chdr_tgt})
-        target_compile_options(${_chdr_tgt} PRIVATE -w
-            -fno-sanitize=undefined,address)
+        target_compile_options(${_chdr_tgt} PRIVATE ${UMDPLAY_THIRDPARTY_WARN_FLAGS})
+        if(NOT MSVC)
+            # Keep vendored code out of sanitizer instrumentation (a benign
+            # signed left shift in its bitstream code trips UBSan).
+            target_compile_options(${_chdr_tgt} PRIVATE -fno-sanitize=undefined,address)
+        endif()
     endif()
 endforeach()
 
@@ -137,10 +164,7 @@ if(AVFILTER_FOUND)
 else()
     message(STATUS "UMDPlay: libavfilter not found — interlaced frames pass through")
 endif()
-target_compile_options(umdplay_core PRIVATE -Wall -Wextra -Wpedantic)
-if(UMDPLAY_WERROR)
-    target_compile_options(umdplay_core PRIVATE -Werror)
-endif()
+target_compile_options(umdplay_core PRIVATE ${UMDPLAY_WARN_FLAGS})
 
 # --- Procedural WMC UI sound effects (SDL2 audio; no bundled samples) ---
 # Split into its own small library so both the player and its unit test link it
@@ -148,10 +172,7 @@ endif()
 add_library(umdplay_ui_sfx STATIC src/ui_sfx.cpp)
 target_include_directories(umdplay_ui_sfx PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(umdplay_ui_sfx PUBLIC ${SDL2_LIBRARIES})
-target_compile_options(umdplay_ui_sfx PRIVATE -Wall -Wextra -Wpedantic)
-if(UMDPLAY_WERROR)
-    target_compile_options(umdplay_ui_sfx PRIVATE -Werror)
-endif()
+target_compile_options(umdplay_ui_sfx PRIVATE ${UMDPLAY_WARN_FLAGS})
 
 # --- Player executable ---
 add_executable(umdplay
@@ -165,27 +186,24 @@ target_link_libraries(umdplay PRIVATE
     umdplay_core umdplay_ui_sfx imgui_backends stb_image
     ${SDL2_LIBRARIES}
 )
-target_compile_options(umdplay PRIVATE -Wall -Wextra -Wpedantic)
-if(UMDPLAY_WERROR)
-    target_compile_options(umdplay PRIVATE -Werror)
-endif()
+target_compile_options(umdplay PRIVATE ${UMDPLAY_WARN_FLAGS})
 
 # --- Tests ---
 enable_testing()
 
 add_executable(test_audio_decoder tests/test_audio_decoder.cpp)
 target_link_libraries(test_audio_decoder PRIVATE umdplay_core)
-target_compile_options(test_audio_decoder PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(test_audio_decoder PRIVATE ${UMDPLAY_WARN_FLAGS})
 add_test(NAME test_audio_decoder COMMAND test_audio_decoder)
 
 add_executable(test_param_sfo tests/test_param_sfo.cpp)
 target_link_libraries(test_param_sfo PRIVATE umdplay_core)
-target_compile_options(test_param_sfo PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(test_param_sfo PRIVATE ${UMDPLAY_WARN_FLAGS})
 add_test(NAME test_param_sfo COMMAND test_param_sfo)
 
 add_executable(test_recent tests/test_recent.cpp)
 target_link_libraries(test_recent PRIVATE umdplay_core)
-target_compile_options(test_recent PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(test_recent PRIVATE ${UMDPLAY_WARN_FLAGS})
 add_test(NAME test_recent COMMAND test_recent)
 # Run in an isolated config dir so the real ~/.config/umdplay is never touched.
 set_tests_properties(test_recent PROPERTIES
@@ -193,7 +211,7 @@ set_tests_properties(test_recent PROPERTIES
 
 add_executable(test_playback tests/test_playback.cpp)
 target_link_libraries(test_playback PRIVATE umdplay_core)
-target_compile_options(test_playback PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(test_playback PRIVATE ${UMDPLAY_WARN_FLAGS})
 add_test(NAME test_playback COMMAND test_playback)
 # Decodes a real stream when an ISO is reachable; state checks otherwise.
 set_tests_properties(test_playback PROPERTIES
@@ -203,13 +221,13 @@ set_tests_properties(test_playback PROPERTIES
 # Pure math: the SDL-free gesture recognizer and the aspect/zoom modes.
 add_executable(test_gesture tests/test_gesture.cpp)
 target_link_libraries(test_gesture PRIVATE umdplay_core)
-target_compile_options(test_gesture PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(test_gesture PRIVATE ${UMDPLAY_WARN_FLAGS})
 add_test(NAME test_gesture COMMAND test_gesture)
 
 # Pure parsers: PLAYLIST.UMD (tracks + chapter markers) and .RCO containers.
 add_executable(test_playlist tests/test_playlist.cpp)
 target_link_libraries(test_playlist PRIVATE umdplay_core)
-target_compile_options(test_playlist PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(test_playlist PRIVATE ${UMDPLAY_WARN_FLAGS})
 add_test(NAME test_playlist COMMAND test_playlist)
 # When a real ISO is reachable it also parses the disc's PLAYLIST.UMD/.RCO.
 set_tests_properties(test_playlist PROPERTIES
@@ -226,7 +244,7 @@ set_tests_properties(test_audio_decoder PROPERTIES
 # when a real ISO + chdman are present it also cross-checks IsoReader on a CHD.
 add_executable(test_chd tests/test_chd.cpp)
 target_link_libraries(test_chd PRIVATE umdplay_core)
-target_compile_options(test_chd PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(test_chd PRIVATE ${UMDPLAY_WARN_FLAGS})
 add_test(NAME test_chd COMMAND test_chd)
 set_tests_properties(test_chd PROPERTIES
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
@@ -237,17 +255,14 @@ set_tests_properties(test_chd PROPERTIES
 # sectors. Needs no real disc.
 add_executable(test_iso_reader tests/test_iso_reader.cpp)
 target_link_libraries(test_iso_reader PRIVATE umdplay_core)
-target_compile_options(test_iso_reader PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(test_iso_reader PRIVATE ${UMDPLAY_WARN_FLAGS})
 add_test(NAME test_iso_reader COMMAND test_iso_reader)
 
 # Procedural UI sound synthesis: asserts every cue is non-silent, finite and
 # in-range, and exercises the SDL playback path under the dummy audio driver.
 add_executable(test_ui_sfx tests/test_ui_sfx.cpp)
 target_link_libraries(test_ui_sfx PRIVATE umdplay_ui_sfx)
-target_compile_options(test_ui_sfx PRIVATE -Wall -Wextra -Wpedantic)
-if(UMDPLAY_WERROR)
-    target_compile_options(test_ui_sfx PRIVATE -Werror)
-endif()
+target_compile_options(test_ui_sfx PRIVATE ${UMDPLAY_WARN_FLAGS})
 add_test(NAME test_ui_sfx COMMAND test_ui_sfx)
 set_tests_properties(test_ui_sfx PROPERTIES
     ENVIRONMENT "SDL_AUDIODRIVER=dummy")

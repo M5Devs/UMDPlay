@@ -9,7 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
-#include <sys/stat.h>
+#include <filesystem>
 
 namespace {
 
@@ -39,10 +39,10 @@ const char* kFontCandidates[] = {
 };
 
 // ImGui's AddFontFromFileTTF calls ErrorLog() on a missing file, which asserts
-// via BeginErrorTooltip() outside a frame and crashes. Stat the file first.
+// via BeginErrorTooltip() outside a frame and crashes. Test existence first.
 bool file_exists(const char* path) {
-    struct stat st;
-    return path && stat(path, &st) == 0;
+    std::error_code ec;
+    return path && std::filesystem::exists(path, ec);
 }
 
 ImU32 with_alpha(ImU32 c, float a) {

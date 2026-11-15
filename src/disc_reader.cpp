@@ -5,9 +5,15 @@
 #include <cstring>
 #include <mutex>
 
+#if defined(_WIN32)
+#include <fcntl.h>    // _O_RDONLY / _O_BINARY
+#include <io.h>       // _open / _close / _read / _lseeki64
+#include <sys/stat.h> // _fstat64 / _S_IFREG
+#else
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 extern "C" {
 #include <libchdr/chd.h>
@@ -16,6 +22,60 @@ extern "C" {
 namespace umdplay {
 
 namespace {
+
+// --- file-descriptor primitives -------------------------------------------
+// Windows (MinGW/MSVC) has no pread(); emulate the positioned read with a
+// seek + read pair. The seek mutates the shared file offset, so the pair is
+// serialized with a mutex to keep FileBackend::read_at() thread-safe there.
+#if defined(_WIN32)
+int fd_open_read(const char* path) {
+    return ::_open(path, _O_RDONLY | _O_BINARY);
+}
+void fd_close(int fd) { ::_close(fd); }
+bool fd_regular_size(int fd, uint64_t* size) {
+    struct _stat64 st {};
+    if (::_fstat64(fd, &st) != 0 || (st.st_mode & _S_IFMT) != _S_IFREG) return false;
+    *size = static_cast<uint64_t>(st.st_size);
+    return true;
+}
+size_t fd_pread(int fd, uint64_t offset, void* dst, size_t size) {
+    static std::mutex m;
+    std::lock_guard<std::mutex> lock(m);
+    if (::_lseeki64(fd, static_cast<long long>(offset), SEEK_SET) < 0) return 0;
+    uint8_t* out = static_cast<uint8_t*>(dst);
+    size_t done = 0;
+    while (done < size) {
+        const unsigned int chunk =
+            static_cast<unsigned int>(std::min<size_t>(size - done, 1u << 30));
+        const int n = ::_read(fd, out + done, chunk);
+        if (n <= 0) break;
+        done += static_cast<size_t>(n);
+    }
+    return done;
+}
+#else
+int fd_open_read(const char* path) { return ::open(path, O_RDONLY); }
+void fd_close(int fd) { ::close(fd); }
+bool fd_regular_size(int fd, uint64_t* size) {
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) return false;
+    *size = static_cast<uint64_t>(st.st_size);
+    return true;
+}
+size_t fd_pread(int fd, uint64_t offset, void* dst, size_t size) {
+    uint8_t* out = static_cast<uint8_t*>(dst);
+    size_t done = 0;
+    // pread() is a stateless positioned read, so concurrent callers each see a
+    // consistent view without sharing a file cursor.
+    while (done < size) {
+        const ssize_t n = ::pread(fd, out + done, size - done,
+                                  static_cast<off_t>(offset + done));
+        if (n <= 0) break;
+        done += static_cast<size_t>(n);
+    }
+    return done;
+}
+#endif
 
 // Lowercased copy of the extension (including the dot), or "" when there is none.
 std::string lower_ext(const std::string& path) {
@@ -54,38 +114,28 @@ bool is_disc_image_path(const std::string& path) {
 // --- FileBackend ----------------------------------------------------------
 
 FileBackend::~FileBackend() {
-    if (m_fd >= 0) ::close(m_fd);
+    if (m_fd >= 0) fd_close(m_fd);
 }
 
 std::unique_ptr<FileBackend> FileBackend::open(const std::string& path) {
-    const int fd = ::open(path.c_str(), O_RDONLY);
+    const int fd = fd_open_read(path.c_str());
     if (fd < 0) return nullptr;
 
-    struct stat st {};
-    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
-        ::close(fd);
+    uint64_t size = 0;
+    if (!fd_regular_size(fd, &size)) {
+        fd_close(fd);
         return nullptr;
     }
 
     auto be = std::unique_ptr<FileBackend>(new FileBackend());
     be->m_fd = fd;
-    be->m_size = static_cast<uint64_t>(st.st_size);
+    be->m_size = size;
     return be;
 }
 
 size_t FileBackend::read_at(uint64_t offset, void* dst, size_t size) const {
     if (m_fd < 0 || !dst) return 0;
-    uint8_t* out = static_cast<uint8_t*>(dst);
-    size_t done = 0;
-    // pread() is a stateless positioned read, so concurrent callers each see a
-    // consistent view without sharing a file cursor.
-    while (done < size) {
-        const ssize_t n = ::pread(m_fd, out + done, size - done,
-                                  static_cast<off_t>(offset + done));
-        if (n <= 0) break;
-        done += static_cast<size_t>(n);
-    }
-    return done;
+    return fd_pread(m_fd, offset, dst, size);
 }
 
 // --- ChdBackend -----------------------------------------------------------

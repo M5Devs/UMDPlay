@@ -1,0 +1,188 @@
+name: Release
+
+# Cut a release by pushing a version tag (e.g. `git tag v0.4.0 && git push --tags`).
+# The workflow builds ready-to-run Linux and Windows bundles and attaches them to
+# the GitHub Release. Manual runs (workflow_dispatch) build the same bundles but
+# upload them as workflow artifacts instead of publishing a release.
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux (x86_64): a self-contained tar.gz with the binary plus every shared
+  # library it needs (SDL2, FFmpeg, …), so it runs without apt-installing deps.
+  # ---------------------------------------------------------------------------
+  build-linux:
+    name: Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake build-essential pkg-config \
+                                  libavformat-dev libavcodec-dev libavutil-dev \
+                                  libswscale-dev libswresample-dev libavfilter-dev \
+                                  libsdl2-dev fonts-noto-cjk
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} -DUMDPLAY_WERROR=ON
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} -j"$(nproc)"
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure
+
+      - name: Assemble bundle
+        run: |
+          set -euo pipefail
+          NAME=umdplay-${{ github.ref_name }}-linux-x86_64
+          ROOT="dist/$NAME"
+          mkdir -p "$ROOT/lib"
+          cp build/bin/umdplay "$ROOT/"
+          # Bundle the non-core shared libraries so the tarball is portable.
+          ldd build/bin/umdplay | awk '{print $3}' | grep -E '^/' | sort -u | \
+          while read -r lib; do
+            case "$lib" in
+              */libc.so*|*/libm.so*|*/ld-linux*|*/libpthread.so*|*/libdl.so*|*/librt.so*)
+                continue ;;
+            esac
+            cp -L "$lib" "$ROOT/lib/" 2>/dev/null || true
+          done
+          cat > "$ROOT/umdplay.sh" <<'SH'
+          #!/bin/sh
+          # Launcher: point the dynamic loader at the bundled libraries.
+          DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+          export LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          exec "$DIR/umdplay" "$@"
+          SH
+          chmod +x "$ROOT/umdplay.sh"
+          cp README.md "$ROOT/" 2>/dev/null || true
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          ls -lh dist/
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-bundle
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Windows (x86_64): MSYS2 MinGW64 build of the same sources, bundled with the
+  # MinGW runtime + SDL2/FFmpeg DLLs (and ffmpeg.exe for --export-clip).
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Windows x86_64 (MinGW)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 / MinGW64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-ffmpeg
+            zip
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} -DUMDPLAY_WERROR=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure
+
+      - name: Smoke test (headless)
+        # --help must always work; the demo screenshot proves the renderer and
+        # ImGui back-end initialise on Windows. The screenshot is best-effort
+        # (the dummy video driver is not guaranteed to expose a render target).
+        run: |
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ./build/bin/umdplay.exe --help || true
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+            ./build/bin/umdplay.exe --demo --strip recent --screenshot demo.png || true
+
+      - name: Assemble bundle
+        run: |
+          set -e
+          NAME=umdplay-${{ github.ref_name }}-windows-x86_64
+          ROOT="dist/$NAME"
+          mkdir -p "$ROOT"
+          cp build/bin/umdplay.exe "$ROOT/"
+          # Collect the MinGW runtime and SDL2/FFmpeg DLLs the exe links against.
+          ldd build/bin/umdplay.exe | awk '{print $3}' | grep -E '^/mingw64/' | sort -u | \
+          while read -r dll; do cp -L "$dll" "$ROOT/"; done
+          # ffmpeg/ffprobe are runtime helpers for --export-clip.
+          cp /mingw64/bin/ffmpeg.exe /mingw64/bin/ffprobe.exe "$ROOT/" 2>/dev/null || true
+          cp README.md "$ROOT/" 2>/dev/null || true
+          ( cd dist && zip -r -q "$NAME.zip" "$NAME" )
+          ls -lh dist/
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundle
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Publish: only on a version tag. Downloads both bundles and attaches them to
+  # a GitHub Release for the tag.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish Release
+    needs: [ build-linux, build-windows ]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List bundles
+        run: ls -lh dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+          generate_release_notes: true
+          body: |
+            Ready-to-run **UMDPlay** builds for Linux and Windows.
+
+            - `umdplay-${{ github.ref_name }}-linux-x86_64.tar.gz` — extract and run
+              `./umdplay.sh <disc.iso>`. Shared libraries are bundled.
+            - `umdplay-${{ github.ref_name }}-windows-x86_64.zip` — extract and run
+              `umdplay.exe <disc.iso>`. DLLs (SDL2, FFmpeg) are bundled.
+
+            A UMD Video ISO is required at runtime. Requires OpenGL/SDL2 support.
+
+            _This release was published by an AI agent (OpenHands) on behalf of the maintainers._

@@ -13,12 +13,22 @@ std::string config_dir() {
     if (const char* env = std::getenv("UMDPLAY_CONFIG_DIR"); env && *env) {
         return env;
     }
+#if defined(_WIN32)
+    // HOME is typically unset on native Windows; APPDATA is the per-user root.
+    if (const char* appdata = std::getenv("APPDATA"); appdata && *appdata) {
+        return (fs::path(appdata) / "umdplay").string();
+    }
+    if (const char* home = std::getenv("USERPROFILE"); home && *home) {
+        return (fs::path(home) / "umdplay").string();
+    }
+#else
     if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && *xdg) {
-        return std::string(xdg) + "/umdplay";
+        return (fs::path(xdg) / "umdplay").string();
     }
     if (const char* home = std::getenv("HOME"); home && *home) {
-        return std::string(home) + "/.config/umdplay";
+        return (fs::path(home) / ".config" / "umdplay").string();
     }
+#endif
     return ".umdplay";
 }
 

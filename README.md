@@ -115,6 +115,16 @@ license compatibility).
 
 ## 🔧 Building from source
 
+### Pre-built binaries
+
+Tagged releases ship ready-to-run bundles on the
+[Releases page](https://github.com/M5Devs/UMDPlay/releases):
+
+- **Linux x86_64** — `.tar.gz`; extract and run `./umdplay.sh <disc.iso>`
+  (shared libraries bundled).
+- **Windows x86_64** — `.zip`; extract and run `umdplay.exe <disc.iso>`
+  (MinGW runtime, SDL2 and FFmpeg DLLs bundled).
+
 ### Prerequisites (Ubuntu / Debian)
 
 ```bash
@@ -150,6 +160,23 @@ cmake --build build -j"$(nproc)"
 cd build && ctest --output-on-failure
 ```
 
+### Windows (MSYS2 / MinGW-w64)
+
+The sources are portable to Windows; `_WIN32` branches replace the POSIX-only
+file-descriptor and process-spawning calls. From an **MSYS2 MINGW64** shell:
+
+```bash
+pacman -S --needed git mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake \
+                       mingw-w64-x86_64-ninja mingw-w64-x86_64-pkgconf \
+                       mingw-w64-x86_64-SDL2 mingw-w64-x86_64-ffmpeg
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DUMDPLAY_WERROR=ON
+cmake --build build
+cd build && ctest --output-on-failure
+```
+
+Run `umdplay.exe` from a MINGW64 shell (or copy the MinGW/SDL2/FFmpeg DLLs
+next to it); the release `.zip` already bundles them.
+
 ### Strict / sanitizer builds (what CI enforces)
 
 ```bash
@@ -158,7 +185,8 @@ cmake -B build-werror -DUMDPLAY_WERROR=ON && cmake --build build-werror -j"$(npr
 
 # Address + Undefined + Leak sanitizers (suppressions in tests/lsan.supp)
 cmake -B build-san -DUMDPLAY_SANITIZE=ON && cmake --build build-san -j"$(nproc)"
-LSAN_OPTIONS=suppressions=tests/lsan.supp ctest --test-dir build-san --output-on-failure
+LSAN_OPTIONS=suppressions="$PWD/tests/lsan.supp" \
+    ctest --test-dir build-san --output-on-failure
 ```
 
 ### Headless (CI / Docker)
