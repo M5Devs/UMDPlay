@@ -77,6 +77,16 @@ include_directories(
     ${SDL2_INCLUDE_DIRS}
 )
 
+# pkg-config reports -L directories for each module. On Linux these are already
+# default linker search paths, but on Homebrew (macOS) FFmpeg/SDL2 live under
+# /opt/homebrew/opt/*/lib, so pass the directories through or linking fails with
+# "ld: library 'SDL2' not found". Must precede the targets that link them.
+link_directories(
+    ${AVFORMAT_LIBRARY_DIRS} ${AVCODEC_LIBRARY_DIRS} ${AVUTIL_LIBRARY_DIRS}
+    ${SWSCALE_LIBRARY_DIRS} ${SWRESAMPLE_LIBRARY_DIRS} ${AVFILTER_LIBRARY_DIRS}
+    ${SDL2_LIBRARY_DIRS}
+)
+
 # --- Dear ImGui (lightweight, fetched & pinned) ---
 include(FetchContent)
 set(IMGUI_TAG v1.91.5)
