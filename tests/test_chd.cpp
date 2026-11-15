@@ -114,6 +114,9 @@ void test_iso_backend() {
     CHECK(r.read_sector(0, sec));
     CHECK(sec[0] == pattern_byte(0));
 
+    // Close before removing: Windows refuses to delete a file that still has an
+    // open handle (POSIX would allow it).
+    r.close();
     fs::remove(path);
 }
 
@@ -200,25 +203,29 @@ void test_real_iso_vs_chd(const std::string& iso) {
         return;
     }
 
-    IsoReader iso_reader(iso);
-    IsoReader chd_reader(chd);
-    const bool ok_iso = iso_reader.open();
-    const bool ok_chd = chd_reader.open();
-    CHECK(ok_iso);
-    CHECK(ok_chd);
+    {
+        // Scoped so both readers close their file handles before the removes
+        // below (Windows will not delete a file with an open handle).
+        IsoReader iso_reader(iso);
+        IsoReader chd_reader(chd);
+        const bool ok_iso = iso_reader.open();
+        const bool ok_chd = chd_reader.open();
+        CHECK(ok_iso);
+        CHECK(ok_chd);
 
-    if (ok_iso && ok_chd) {
-        const auto a = iso_reader.get_mps_entries();
-        const auto b = chd_reader.get_mps_entries();
-        CHECK(a.size() == b.size());
-        CHECK(a.size() == 4);
-        for (size_t i = 0; i < std::min(a.size(), b.size()); ++i) {
-            CHECK(a[i].name == b[i].name);
-            CHECK(a[i].lba == b[i].lba);
-            CHECK(a[i].size_bytes == b[i].size_bytes);
+        if (ok_iso && ok_chd) {
+            const auto a = iso_reader.get_mps_entries();
+            const auto b = chd_reader.get_mps_entries();
+            CHECK(a.size() == b.size());
+            CHECK(a.size() == 4);
+            for (size_t i = 0; i < std::min(a.size(), b.size()); ++i) {
+                CHECK(a[i].name == b[i].name);
+                CHECK(a[i].lba == b[i].lba);
+                CHECK(a[i].size_bytes == b[i].size_bytes);
+            }
+            // Metadata (PARAM.SFO title) must match too.
+            CHECK(iso_reader.param().title == chd_reader.param().title);
         }
-        // Metadata (PARAM.SFO title) must match too.
-        CHECK(iso_reader.param().title == chd_reader.param().title);
     }
 
     fs::remove(head);
