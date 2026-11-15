@@ -54,6 +54,21 @@ Offset             Size    Field
 To avoid extracting gigabytes of data to disk, `UMDPlay` feeds raw sector streams directly into FFmpeg via a custom `AVIOContext` with seekable callbacks:
 `Base_Byte_Offset = entry.lba * 2048`.
 
+The bytes themselves come from a `DiscReader` (`include/disc_reader.h`) — a thin
+byte-range abstraction with two backends selected by file extension:
+
+- **`iso`** — raw 2048-byte-sector images read with a plain positional read.
+- **`chd`** — MAME *Compressed Hunks of Data* files decoded through
+  [libchdr](https://github.com/rtissera/libchdr) (fetched and statically linked
+  by CMake). CHDs are stored in 4096-byte hunks while UMD sectors are 2048
+  bytes, so `ChdBackend` keeps a small direct-mapped cache of decompressed
+  hunks and serves unaligned cross-hunk reads from it.
+
+`IsoReader`, `Decoder` (both the `AVIOContext` and the hand PSMF audio demuxer)
+and the clip exporter all read through this one interface, so `.iso` and `.chd`
+behave identically — verified by exporting byte-identical MP4 clips from an ISO
+and its CHD twin.
+
 ---
 
 ## The Sony PSMF Audio Structure (Reverse-Engineered)

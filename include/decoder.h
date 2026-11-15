@@ -121,7 +121,9 @@ public:
 
 private:
     struct StreamIoState {
-        std::ifstream iso_file;
+        // Non-owning: the disc image lives in Decoder::m_reader so the AVIOContext
+        // and the hand PSMF demuxer share one ISO/CHD backend.
+        const umdplay::DiscReader* reader = nullptr;
         uint64_t      base_offset = 0;   // entry.lba * 2048
         uint64_t      file_size   = 0;   // entry.size_bytes
         uint64_t      cursor      = 0;   // offset relative to base
@@ -191,11 +193,11 @@ private:
     bool                 m_psmf_pts_started = true;   // accepting audio PES (>= anchor)
     int64_t              m_vcount       = 0;   // video frames emitted (A/V pacing)
     std::vector<uint8_t> m_psmf_scan;          // reusable read buffer
-    std::ifstream        m_psmf_file;
     AVPacket*            m_psmf_pkt     = nullptr;
     AVFrame*             m_psmf_video   = nullptr; // stashed frame for A/V interleave
     bool                 m_psmf_video_pending = false;
     std::string          m_iso_path;
+    umdplay::DiscReader  m_reader;             // ISO or CHD disc image (read_at)
 
     SwrContext*      m_swr_ctx     = nullptr;
     AVFrame*         m_temp_audio_frame = nullptr;

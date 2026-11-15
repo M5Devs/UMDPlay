@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(UMDPlay VERSION 0.4.0 LANGUAGES CXX)
+project(UMDPlay VERSION 0.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -58,12 +58,46 @@ target_include_directories(imgui_backends PUBLIC
 target_link_libraries(imgui_backends PUBLIC ${SDL2_LIBRARIES})
 target_compile_options(imgui_backends PRIVATE -w)   # third-party: silence its warnings
 
+# --- libchdr (Compressed Hunks of Data; fetched & pinned) ---
+# libchdr is a C library with vendored lzma/miniz/zstd under deps/. It is
+# consumed as a static archive only; its own tests and shared library are
+# disabled so nothing else is built. Its warnings are silenced (-w) because the
+# project keeps -Werror on its own targets — third-party code must not fail the
+# build. This has to be set before the subdirectory is added (its targets do not
+# accept -w via target_compile_options once created with CMAKE_C_FLAGS unset).
+set(CHDR_TAG v0.3.0)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(CHDR_WANT_TESTS OFF CACHE BOOL "" FORCE)
+set(INSTALL_STATIC_LIBS OFF CACHE BOOL "" FORCE)
+set(WITH_SYSTEM_ZLIB OFF CACHE BOOL "" FORCE)
+set(WITH_SYSTEM_ZSTD OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    chdr
+    GIT_REPOSITORY https://github.com/rtissera/libchdr.git
+    GIT_TAG        ${CHDR_TAG}
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(chdr)
+
+# Silence third-party warnings and keep it out of sanitizer instrumentation, so
+# a project-wide -Werror / ASan+UBSan run is never failed by vendored code.
+# libchdr's reference bitstream code does a benign signed left shift that UBSan
+# flags; excluding it here keeps the project's own sources the only ones under
+# test. Both flags are harmless in a normal (non-sanitizer) build.
+foreach(_chdr_tgt chdr-static miniz zstd chdr-lzma)
+    if(TARGET ${_chdr_tgt})
+        target_compile_options(${_chdr_tgt} PRIVATE -w
+            -fno-sanitize=undefined,address)
+    endif()
+endforeach()
+
 # stb single-header libs (implementation lives in src/stb_impl.cpp)
 add_library(stb_image STATIC src/stb_impl.cpp)
 target_include_directories(stb_image PUBLIC ${PROJECT_SOURCE_DIR}/third_party)
 
 # --- UMDPlay core (decoder + ISO reader + SFO parser), shared by app & tests ---
 add_library(umdplay_core STATIC
+    src/disc_reader.cpp
     src/iso_reader.cpp
     src/param_sfo.cpp
     src/decoder.cpp
@@ -75,7 +109,11 @@ add_library(umdplay_core STATIC
     src/vsmx_vm.cpp
     src/rco_menu.cpp
 )
+target_include_directories(umdplay_core PUBLIC
+    ${chdr_SOURCE_DIR}/include
+)
 target_link_libraries(umdplay_core PUBLIC
+    chdr-static
     ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES}
     ${SWSCALE_LIBRARIES} ${SWRESAMPLE_LIBRARIES} ${AVFILTER_LIBRARIES}
 )
@@ -152,6 +190,16 @@ set_tests_properties(test_playlist PROPERTIES
 set_tests_properties(test_audio_decoder PROPERTIES
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     ENVIRONMENT "UMD_ISO=${PROJECT_SOURCE_DIR}/test_umd.iso")
+
+# DiscReader (ISO / CHD byte-range abstraction). Uses a committed CHD fixture;
+# when a real ISO + chdman are present it also cross-checks IsoReader on a CHD.
+add_executable(test_chd tests/test_chd.cpp)
+target_link_libraries(test_chd PRIVATE umdplay_core)
+target_compile_options(test_chd PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME test_chd COMMAND test_chd)
+set_tests_properties(test_chd PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    ENVIRONMENT "UMD_ISO=${PROJECT_SOURCE_DIR}/test_umd.iso;UMD_CHD_FIXTURE=${PROJECT_SOURCE_DIR}/tests/fixtures/pattern.chd")
 
 install(TARGETS umdplay DESTINATION bin)
 

@@ -12,20 +12,18 @@ IsoReader::IsoReader(const std::string& iso_path)
 IsoReader::~IsoReader() {}
 
 bool IsoReader::read_sector(uint32_t lba, uint8_t* buf) const {
-    std::ifstream f(m_iso_path, std::ios::binary);
-    if (!f) return false;
-    f.seekg(static_cast<std::streamoff>(lba) * UMD_SECTOR_SIZE);
-    f.read(reinterpret_cast<char*>(buf), UMD_SECTOR_SIZE);
-    return static_cast<size_t>(f.gcount()) == UMD_SECTOR_SIZE;
+    return m_reader.read_sector(lba, buf);
 }
 
 bool IsoReader::open() {
-    std::ifstream f(m_iso_path, std::ios::binary);
-    if (!f.is_open()) {
-        std::cerr << "[IsoReader] ERROR: Cannot open ISO: " << m_iso_path << "\n";
+    if (!m_reader.open(m_iso_path)) {
+        std::cerr << "[IsoReader] ERROR: Cannot open image: " << m_iso_path
+                  << " (" << m_reader.last_error() << ")\n";
         return false;
     }
-    std::cout << "[IsoReader] Opened: " << m_iso_path << "\n";
+    std::cout << "[IsoReader] Opened: " << m_iso_path
+              << "  [" << m_reader.backend_name() << " backend, "
+              << m_reader.size() << " bytes]\n";
     std::cout << "[IsoReader] Using UDF path (STREAM/ @ LBA "
               << UMD_STREAM_DIR_LBA << ")\n";
 
@@ -48,11 +46,8 @@ std::vector<IsoReader::IsoDirRecord> IsoReader::list_iso_dir(uint32_t lba,
     // Clamp to a sane bound (a directory never legitimately exceeds 1 MiB here).
     const uint32_t cap = std::min<uint32_t>(size, 1u << 20);
     std::vector<uint8_t> data(cap);
-    std::ifstream f(m_iso_path, std::ios::binary);
-    if (!f) return out;
-    f.seekg(static_cast<std::streamoff>(lba) * UMD_SECTOR_SIZE);
-    f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(cap));
-    const size_t got = static_cast<size_t>(f.gcount());
+    const size_t got = m_reader.read_at(static_cast<uint64_t>(lba) * UMD_SECTOR_SIZE,
+                                        data.data(), cap);
     data.resize(got);
 
     size_t off = 0;
@@ -102,12 +97,10 @@ std::vector<uint8_t> IsoReader::read_file(uint32_t lba, uint32_t size_bytes) con
     // Guard against a corrupt size field (cap at 64 MiB — PLAYLIST/CLP/RCO are
     // all far smaller; the biggest .MPS is read through read_mps()).
     const uint32_t cap = std::min<uint32_t>(size_bytes, 64u << 20);
-    std::ifstream f(m_iso_path, std::ios::binary);
-    if (!f) return {};
-    f.seekg(static_cast<std::streamoff>(lba) * UMD_SECTOR_SIZE);
     std::vector<uint8_t> buf(cap);
-    f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(cap));
-    buf.resize(static_cast<size_t>(f.gcount()));
+    const size_t got = m_reader.read_at(static_cast<uint64_t>(lba) * UMD_SECTOR_SIZE,
+                                        buf.data(), cap);
+    buf.resize(got);
     return buf;
 }
 
@@ -253,13 +246,10 @@ bool IsoReader::has_metadata(const std::string& filename) const {
 std::vector<uint8_t> IsoReader::read_metadata(const std::string& filename) const {
     for (const auto& f : m_metadata) {
         if (f.name != filename) continue;
-        std::ifstream in(m_iso_path, std::ios::binary);
-        if (!in) return {};
-        in.seekg(static_cast<std::streamoff>(f.lba) * UMD_SECTOR_SIZE);
         std::vector<uint8_t> buf(f.size_bytes);
-        in.read(reinterpret_cast<char*>(buf.data()),
-                static_cast<std::streamsize>(buf.size()));
-        buf.resize(static_cast<size_t>(in.gcount()));
+        const size_t got = m_reader.read_at(
+            static_cast<uint64_t>(f.lba) * UMD_SECTOR_SIZE, buf.data(), buf.size());
+        buf.resize(got);
         return buf;
     }
     return {};
@@ -382,22 +372,18 @@ std::vector<uint8_t> IsoReader::read_asset(const std::string& name) const {
 }
 
 std::vector<uint8_t> IsoReader::read_mps(const MpsEntry& entry) const {
-    std::ifstream f(m_iso_path, std::ios::binary);
-    if (!f) return {};
-    f.seekg(static_cast<std::streamoff>(entry.lba) * UMD_SECTOR_SIZE);
     std::vector<uint8_t> buf(entry.size_bytes);
-    f.read(reinterpret_cast<char*>(buf.data()), entry.size_bytes);
-    buf.resize(static_cast<size_t>(f.gcount()));
+    const size_t got = m_reader.read_at(
+        static_cast<uint64_t>(entry.lba) * UMD_SECTOR_SIZE, buf.data(), buf.size());
+    buf.resize(got);
     return buf;
 }
 
 void IsoReader::dump_mps_header(const MpsEntry& entry, size_t bytes) const {
-    std::ifstream f(m_iso_path, std::ios::binary);
-    if (!f) return;
-    f.seekg(static_cast<std::streamoff>(entry.lba) * UMD_SECTOR_SIZE);
-    std::vector<uint8_t> buf(std::min<size_t>(bytes, 4096));
-    f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
-    const size_t got = static_cast<size_t>(f.gcount());
+    const size_t want = std::min<size_t>(bytes, 4096);
+    std::vector<uint8_t> buf(want);
+    const size_t got = m_reader.read_at(
+        static_cast<uint64_t>(entry.lba) * UMD_SECTOR_SIZE, buf.data(), want);
 
     std::cout << "[IsoReader] " << entry.name << " header ("
               << got << " bytes):\n";
@@ -421,17 +407,15 @@ bool IsoReader::extract_all(const std::string& output_dir) const {
             std::cerr << "[IsoReader] Cannot write " << path << "\n";
             return false;
         }
-        std::ifstream in(m_iso_path, std::ios::binary);
-        if (!in) return false;
-        in.seekg(static_cast<std::streamoff>(e.lba) * UMD_SECTOR_SIZE);
         std::vector<char> chunk(1 << 20);
         uint64_t remaining = e.size_bytes;
+        uint64_t cursor = static_cast<uint64_t>(e.lba) * UMD_SECTOR_SIZE;
         while (remaining > 0) {
             const size_t want = static_cast<size_t>(std::min<uint64_t>(remaining, chunk.size()));
-            in.read(chunk.data(), static_cast<std::streamsize>(want));
-            const size_t got = static_cast<size_t>(in.gcount());
+            const size_t got = m_reader.read_at(cursor, chunk.data(), want);
             if (got == 0) break;
             out.write(chunk.data(), static_cast<std::streamsize>(got));
+            cursor += got;
             remaining -= got;
         }
     }

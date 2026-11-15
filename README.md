@@ -24,7 +24,7 @@ UMD Video discs use a specific filesystem structure rooted in the `UMD_VIDEO/` d
 - **ATRAC3plus** audio formats packed inside proprietary Sony **Private Stream 1 (`0xBD`)**
 - Interactive menu overlays built on **`.RCO` / `.VBO`** assets
 
-**UMDPlay** bridges this gap by decoding streams directly in memory via FFmpeg `AVIOContext`, eliminating the need for multi-gigabyte disk extraction.
+**UMDPlay** bridges this gap by decoding streams directly in memory via FFmpeg `AVIOContext`, eliminating the need for multi-gigabyte disk extraction. Disc images are opened through a small `DiscReader` abstraction, so both raw **`.iso`** and compressed **`.chd`** (MAME Compressed Hunks of Data) files work identically.
 
 ---
 
@@ -37,6 +37,7 @@ UMD Video discs use a specific filesystem structure rooted in the `UMD_VIDEO/` d
 | Output & Rendering | SDL2 | Software & GPU-accelerated video/audio output |
 | 10-foot UI | Dear ImGui (SDL2 + SDLRenderer2) | Lightweight, immediate-mode WMC-style shell |
 | Image decode | stb_image / stb_image_write | PARAM.SFO art (`ICON0`/`PIC1`) + PNG screenshots |
+| Disc images | ISO 9660/UDF or CHD (libchdr) | A `DiscReader` byte-range backend picks ISO or CHD by extension |
 | Build System | CMake | Cross-platform, supports MinGW / MSVC / GCC |
 
 ---
@@ -75,7 +76,7 @@ fallback for a stream too short to probe.
 ## 🎮 Command-Line Options
 
 ```text
-Usage: umdplay [path_to_umd_video.iso] [options]
+Usage: umdplay [path_to_umd_video.iso|.chd] [options]
   --play                 start the main feature immediately
   --export-clip <mp4>    decode a clip to MP4 (H.264/AAC) and exit
   --clip-seconds <n>     clip length in seconds (default 12)
@@ -84,7 +85,7 @@ Usage: umdplay [path_to_umd_video.iso] [options]
   --fullscreen           start in fullscreen (F11 / Alt+Enter toggles)
   --strip <name>         start on a hub strip: recent|browse|settings
   --probe                print stream/metadata info and exit
-  --demo                 render the hub with synthetic data (no ISO)
+  --demo                 render the hub with synthetic data (no disc image)
 ```
 
 **Headless clip export** decodes the main `.MPS` stream and muxes H.264 video
@@ -109,8 +110,8 @@ Three horizontal strips, switched with **LEFT / RIGHT**:
 
 | Strip | Contents |
 |---|---|
-| **Recent Discs** | Every ISO you have opened, persisted to `~/.config/umdplay/recent.txt` (override with `$UMDPLAY_CONFIG_DIR`), shown as cover-art cards from `ICON0.PNG`. |
-| **Browse System** | A built-in `std::filesystem` folder/file browser. Navigate folders, filter to `*.iso`, and open any UMD ISO — it loads and is added to Recent automatically. |
+| **Recent Discs** | Every disc image you have opened, persisted to `~/.config/umdplay/recent.txt` (override with `$UMDPLAY_CONFIG_DIR`), shown as cover-art cards from `ICON0.PNG`. |
+| **Browse System** | A built-in `std::filesystem` folder/file browser. Navigate folders, filter to `*.iso` / `*.chd`, and open any UMD image — it loads and is added to Recent automatically. |
 | **Options** | Display Mode (Windowed / Fullscreen) and an Audio Volume / Mute slider. |
 
 Per-disc actions replace the raw `.MPS` file list with clean WMC choices:
