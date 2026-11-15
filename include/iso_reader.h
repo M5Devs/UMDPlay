@@ -1,5 +1,6 @@
 #pragma once
 #include "param_sfo.h"
+#include "disc_reader.h"
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -108,6 +109,7 @@ public:
 
 private:
     std::string           m_iso_path;
+    umdplay::DiscReader   m_reader;     // ISO or CHD backend (see disc_reader.h)
     std::vector<MpsEntry> m_entries;
     std::vector<UmdFile>  m_metadata;   // files found in UMD_VIDEO/ root
     ParamSfo              m_param;

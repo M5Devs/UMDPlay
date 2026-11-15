@@ -29,58 +29,54 @@ Decoder::~Decoder() { close(); }
 
 int Decoder::read_packet(void* opaque, uint8_t* buf, int buf_size) {
     auto* io = static_cast<StreamIoState*>(opaque);
-    if (!io->iso_file.is_open()) return AVERROR_EOF;
+    if (!io->reader || !io->reader->is_open()) return AVERROR_EOF;
 
     if (io->file_size > 0 && io->cursor >= io->file_size) return AVERROR_EOF;
 
-    uint64_t bytes_to_read = buf_size;
+    uint64_t bytes_to_read = static_cast<uint64_t>(buf_size);
     if (io->file_size > 0) {
         bytes_to_read = std::min(bytes_to_read, io->file_size - io->cursor);
     }
     if (bytes_to_read == 0) return AVERROR_EOF;
 
-    io->iso_file.clear();
-    io->iso_file.seekg(io->base_offset + io->cursor, std::ios::beg);
-    io->iso_file.read(reinterpret_cast<char*>(buf), bytes_to_read);
-    std::streamsize bytes_read = io->iso_file.gcount();
-
-    if (bytes_read <= 0) return AVERROR_EOF;
+    const size_t bytes_read = io->reader->read_at(io->base_offset + io->cursor,
+                                                 buf, static_cast<size_t>(bytes_to_read));
+    if (bytes_read == 0) return AVERROR_EOF;
     io->cursor += bytes_read;
     return static_cast<int>(bytes_read);
 }
 
 int64_t Decoder::seek_packet(void* opaque, int64_t offset, int whence) {
     auto* io = static_cast<StreamIoState*>(opaque);
-    if (!io->iso_file.is_open()) return -1;
+    if (!io->reader || !io->reader->is_open()) return -1;
 
     if (whence == AVSEEK_SIZE) {
-        return io->file_size > 0 ? io->file_size : -1;
+        return io->file_size > 0 ? static_cast<int64_t>(io->file_size) : -1;
     }
 
     int64_t new_cursor = 0;
     switch (whence) {
         case SEEK_SET: new_cursor = offset; break;
-        case SEEK_CUR: new_cursor = io->cursor + offset; break;
+        case SEEK_CUR: new_cursor = static_cast<int64_t>(io->cursor) + offset; break;
         case SEEK_END:
             if (io->file_size == 0) return -1;
-            new_cursor = io->file_size + offset;
+            new_cursor = static_cast<int64_t>(io->file_size) + offset;
             break;
         default: return -1;
     }
 
     if (new_cursor < 0) return -1;
-    io->iso_file.clear();
-    io->cursor = new_cursor;
-    return io->cursor;
+    io->cursor = static_cast<uint64_t>(new_cursor);
+    return static_cast<int64_t>(io->cursor);
 }
 
 bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
     close();
 
     m_iso_path = iso_path;
-    m_io.iso_file.open(iso_path, std::ios::binary);
-    if (!m_io.iso_file.is_open()) return false;
+    if (!m_reader.open(iso_path)) return false;
 
+    m_io.reader      = &m_reader;
     m_io.base_offset = static_cast<uint64_t>(entry.lba) * UMD_SECTOR_SIZE;
     m_io.file_size   = entry.size_bytes;
     m_io.cursor      = 0;
@@ -240,8 +236,7 @@ double Decoder::get_duration() const {
 
 bool Decoder::init_psmf_audio() {
 
-    m_psmf_file.open(m_iso_path, std::ios::binary);
-    if (!m_psmf_file.is_open()) return false;
+    if (!m_reader.is_open()) return false;
 
     const AVCodec* audio_decoder = avcodec_find_decoder(AV_CODEC_ID_ATRAC3P);
     if (!audio_decoder) return false;
@@ -288,18 +283,14 @@ bool Decoder::init_psmf_audio() {
 // pack/system headers are parsed generically so video packets are skipped.
 bool Decoder::psmf_read_more() {
     if (m_psmf_eof) return false;
-    if (!m_psmf_file.is_open()) return false;
+    if (!m_reader.is_open()) return false;
 
     while (m_psmf_cursor < m_io.file_size) {
         size_t want = static_cast<size_t>(
             std::min<uint64_t>(PSMF_CHUNK, m_io.file_size - m_psmf_cursor));
         m_psmf_scan.resize(want);
-        m_psmf_file.clear();
-        m_psmf_file.seekg(static_cast<std::streamoff>(m_io.base_offset + m_psmf_cursor),
-                          std::ios::beg);
-        m_psmf_file.read(reinterpret_cast<char*>(m_psmf_scan.data()),
-                         static_cast<std::streamsize>(want));
-        size_t got = static_cast<size_t>(m_psmf_file.gcount());
+        size_t got = m_reader.read_at(m_io.base_offset + m_psmf_cursor,
+                                      m_psmf_scan.data(), want);
         if (got == 0) { m_psmf_eof = true; return false; }
 
         const uint8_t* d = m_psmf_scan.data();
@@ -414,16 +405,12 @@ size_t Decoder::detect_stride_from(const uint8_t* buf, size_t n, size_t fallback
 // Read a window at the stream start and derive the stride from it.
 size_t Decoder::psmf_detect_stride() {
     constexpr size_t WINDOW = 512 * 1024;
-    std::vector<uint8_t> buf(std::min<size_t>(WINDOW, m_io.file_size));
-    if (buf.size() < 16) return SONY_FRAME_STRIDE;
+    const size_t want = std::min<size_t>(WINDOW, m_io.file_size);
+    if (want < 16) return SONY_FRAME_STRIDE;
 
-    m_psmf_file.clear();
-    m_psmf_file.seekg(static_cast<std::streamoff>(m_io.base_offset), std::ios::beg);
-    m_psmf_file.read(reinterpret_cast<char*>(buf.data()),
-                     static_cast<std::streamsize>(buf.size()));
-    const size_t got = static_cast<size_t>(m_psmf_file.gcount());
-
-    return detect_stride_from(buf.data(), got, SONY_FRAME_STRIDE);
+    m_psmf_scan.resize(want);
+    const size_t got = m_reader.read_at(m_io.base_offset, m_psmf_scan.data(), want);
+    return detect_stride_from(m_psmf_scan.data(), got, SONY_FRAME_STRIDE);
 }
 
 // ---------------------------------------------------------------------------
@@ -901,7 +888,7 @@ bool Decoder::seek_relative(double seconds) {
 // `target`, so the hand demuxer re-anchors on a real packet boundary rather
 // than mid-payload. Returns `target` unchanged if no start code is found.
 uint64_t Decoder::psmf_find_scan_offset(uint64_t target) {
-    if (!m_psmf_file.is_open()) return target;
+    if (!m_reader.is_open()) return target;
     if (target >= m_io.file_size) return target;
 
     const uint64_t window = 64 * 1024;
@@ -910,11 +897,8 @@ uint64_t Decoder::psmf_find_scan_offset(uint64_t target) {
     if (want == 0) return target;
 
     m_psmf_scan.resize(want);
-    m_psmf_file.clear();
-    m_psmf_file.seekg(static_cast<std::streamoff>(m_io.base_offset + begin), std::ios::beg);
-    m_psmf_file.read(reinterpret_cast<char*>(m_psmf_scan.data()),
-                     static_cast<std::streamsize>(want));
-    const size_t got = static_cast<size_t>(m_psmf_file.gcount());
+    const size_t got = m_reader.read_at(m_io.base_offset + begin,
+                                        m_psmf_scan.data(), want);
 
     // Walk backwards for the last 00 00 01 BA/BB (pack or system header).
     for (size_t i = got; i >= 4; --i) {
@@ -1061,7 +1045,7 @@ void Decoder::close() {
     free_deinterlace_graph();
     if (m_psmf_pkt) { av_packet_free(&m_psmf_pkt); }
     if (m_psmf_video) { av_frame_free(&m_psmf_video); }
-    if (m_psmf_file.is_open()) m_psmf_file.close();
+    m_reader.close();
     m_psmf_audio = false;
     m_psmf_pes.clear();
     m_psmf_scan.clear();
@@ -1084,5 +1068,5 @@ void Decoder::close() {
     if (m_audio.codec_ctx) { avcodec_free_context(&m_audio.codec_ctx); m_audio = {}; }
     if (m_fmt_ctx) { avformat_close_input(&m_fmt_ctx); m_fmt_ctx = nullptr; }
     if (m_avio_ctx) { av_freep(&m_avio_ctx->buffer); avio_context_free(&m_avio_ctx); }
-    if (m_io.iso_file.is_open()) m_io.iso_file.close();
+    m_io.reader = nullptr;
 }

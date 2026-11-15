@@ -49,7 +49,7 @@ struct Options {
 
 void print_usage() {
     std::cout <<
-        "Usage: umdplay [path_to_umd_video.iso] [options]\n"
+        "Usage: umdplay [path_to_umd_video.iso|.chd] [options]\n"
         "  --play                 start the main feature immediately\n"
         "  --export-clip <mp4>    decode a clip to MP4 (H.264/AAC) and exit\n"
         "  --clip-seconds <n>     clip length in seconds (default 12)\n"
@@ -332,7 +332,8 @@ std::string parent_dir(const std::string& dir) {
     return p.parent_path().string();
 }
 
-// Build the Browse System listing: parent entry, then sub-folders, then *.iso.
+// Build the Browse System listing: parent entry, then sub-folders, then disc
+// images (*.iso / *.chd).
 void build_browse(const std::string& dir, std::vector<BrowseEntry>& out) {
     out.clear();
 
@@ -350,10 +351,7 @@ void build_browse(const std::string& dir, std::vector<BrowseEntry>& out) {
         if (de.is_directory(tec) && !tec) {
             dirs.push_back({name, de.path().string(), true, false});
         } else {
-            std::string lower = name;
-            std::transform(lower.begin(), lower.end(), lower.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (lower.size() > 4 && lower.substr(lower.size() - 4) == ".iso")
+            if (umdplay::is_disc_image_path(name))
                 isos.push_back({name, de.path().string(), false, true});
         }
     }
