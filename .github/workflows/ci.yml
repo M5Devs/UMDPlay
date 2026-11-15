@@ -71,8 +71,18 @@ jobs:
             /tmp/player_osd.png
 
   build-macos:
-    name: macOS (Apple Silicon) Build
-    runs-on: macos-latest
+    name: macOS (${{ matrix.arch }}) Build
+    # macos-latest is Apple Silicon (arm64); macos-15-intel is the x86_64
+    # runner. Both are exercised so the macOS build stays clean on either arch.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout Repository
@@ -120,7 +130,7 @@ jobs:
       - name: Upload UI Screenshots
         uses: actions/upload-artifact@v4
         with:
-          name: macos-ui-preview
+          name: macos-ui-preview-${{ matrix.arch }}
           path: |
             /tmp/wmc_ui_*.png
             /tmp/player_osd.png

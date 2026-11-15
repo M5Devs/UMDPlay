@@ -126,6 +126,7 @@ Tagged releases ship ready-to-run bundles on the
   (MinGW runtime, SDL2 and FFmpeg DLLs bundled).
 - **macOS arm64** (Apple Silicon) — `.tar.gz`; extract and run
   `./umdplay.sh <disc.iso>` (Homebrew FFmpeg/SDL2 dylibs bundled, ad-hoc signed).
+- **macOS x86_64** (Intel) — `.tar.gz`; same as above for Intel Macs.
 
 ### Prerequisites (Ubuntu / Debian)
 
@@ -179,7 +180,7 @@ cd build && ctest --output-on-failure
 Run `umdplay.exe` from a MINGW64 shell (or copy the MinGW/SDL2/FFmpeg DLLs
 next to it); the release `.zip` already bundles them.
 
-### macOS (Apple Silicon)
+### macOS (Apple Silicon + Intel)
 
 The sources are portable to macOS (the POSIX branches compile unchanged under
 Apple Clang). With [Homebrew](https://brew.sh):
