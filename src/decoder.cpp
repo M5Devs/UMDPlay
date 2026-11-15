@@ -11,9 +11,18 @@ static constexpr size_t AVIO_BUF_SIZE = 64 * 1024;
 // Sony PSMF ATRAC3+ framing: each frame is prefixed by an 8-byte sync header.
 // The stride (sync + payload) is detected per stream; 696 bytes is the common
 // 176.4 KB/s stereo default but not universal (see psmf_detect_stride).
-static const uint8_t SONY_FRAME_HEADER[8] = { 0x0F, 0xD0, 0x48, 0x55, 0x00, 0x00, 0x00, 0x00 };
 static constexpr size_t SONY_FRAME_STRIDE = SONY_FRAME_STRIDE_DEFAULT;
 static constexpr size_t PSMF_CHUNK        = 4 * 1024 * 1024;  // read granularity for the 0xBD walk
+
+// Frame sync: 0F D0 48, a frame-size class byte, then four zero bytes. The
+// class byte is 0x55 for the common 696-byte frames but varies with the frame
+// size (UMD-Music discs use 0xD5 for 1720-byte frames), so it is deliberately
+// not matched here; the frame stride is detected separately. Matching only the
+// fixed prefix and the four trailing zeros accepts every PSMF ATRAC3+ variant.
+static bool is_sony_frame_sync(const uint8_t* p, size_t avail) {
+    return avail >= 8 && p[0] == 0x0F && p[1] == 0xD0 && p[2] == 0x48 &&
+           p[4] == 0x00 && p[5] == 0x00 && p[6] == 0x00 && p[7] == 0x00;
+}
 
 // Best-effort presentation time of a decoded frame, in seconds (-1 if unknown).
 static double frame_time(const AVFrame* f, const AVStream* st) {
@@ -156,7 +165,7 @@ bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
                 }
 
                 for (int pos = 0; pos <= size - 8; pos++) {
-                    if (std::memcmp(data + pos, SONY_FRAME_HEADER, 8) == 0) {
+                    if (is_sony_frame_sync(data + pos, static_cast<size_t>(size - pos))) {
                         header_offsets.push_back(pos);
                     }
                 }
@@ -372,7 +381,7 @@ bool Decoder::psmf_read_more() {
 }
 
 // Detect the ATRAC3+ frame stride from a raw byte window: histogram the gaps
-// between consecutive 0F D0 48 55 sync words and take the most common one.
+// between consecutive 0F D0 48 sync words and take the most common one.
 // Larger gaps come from video packets / PES headers interleaved between audio
 // frames, so they never win the vote. Returns `fallback` when fewer than two
 // syncs are visible.
@@ -380,9 +389,8 @@ size_t Decoder::detect_stride_from(const uint8_t* buf, size_t n, size_t fallback
     if (!buf || n < 8) return fallback;
 
     std::vector<size_t> syncs;
-    for (size_t i = 0; i + 4 <= n; ++i) {
-        if (buf[i] == 0x0F && buf[i + 1] == 0xD0 &&
-            buf[i + 2] == 0x48 && buf[i + 3] == 0x55) {
+    for (size_t i = 0; i + 8 <= n; ++i) {
+        if (is_sony_frame_sync(buf + i, n - i)) {
             syncs.push_back(i);
         }
     }
@@ -545,18 +553,33 @@ void Decoder::process_psmf_audio(AVFrame* audio_frame, std::vector<uint8_t>& out
 
     const size_t stride = m_psmf_stride;
     while (true) {
-        // Ensure we have at least one full frame buffered.
+        // Ensure we have at least one frame's worth of data buffered.
         while (m_psmf_pos + stride <= m_psmf_pes.size()) {
             const uint8_t* unit = m_psmf_pes.data() + m_psmf_pos;
-            if (std::memcmp(unit, SONY_FRAME_HEADER, 8) != 0) {
+            if (!is_sony_frame_sync(unit, m_psmf_pes.size() - m_psmf_pos)) {
                 // Lost sync: rescan for the next Sony header.
                 ++m_psmf_pos;
                 continue;
             }
+            // The frame length can change mid-stream (UMD-Music discs switch
+            // from 696-byte to 1720-byte frames). Prefer an exact stride match;
+            // otherwise take the nearest plausible sync header, which yields the
+            // real frame length in either direction.
+            size_t frame_len = stride;
+            const size_t avail = m_psmf_pes.size() - m_psmf_pos;
+            if (!(avail >= stride + 8 && is_sony_frame_sync(unit + stride, avail - stride))) {
+                for (size_t cand = 64; cand <= 8192 && cand + 8 <= avail; ++cand) {
+                    if (is_sony_frame_sync(unit + cand, avail - cand)) {
+                        frame_len = cand;
+                        break;
+                    }
+                }
+            }
+            if (m_psmf_pos + frame_len > m_psmf_pes.size()) break;
             av_packet_unref(m_psmf_pkt);
             m_psmf_pkt->data = const_cast<uint8_t*>(unit + 8);
-            m_psmf_pkt->size = static_cast<int>(stride - 8);
-            m_psmf_pos += stride;
+            m_psmf_pkt->size = static_cast<int>(frame_len - 8);
+            m_psmf_pos += frame_len;
 
             if (avcodec_send_packet(m_audio.codec_ctx, m_psmf_pkt) < 0) continue;
             bool got = false;
@@ -733,17 +756,29 @@ void Decoder::process_audio_packet(AVPacket* pkt, AVFrame* audio_frame, std::vec
     m_audio_buffer.insert(m_audio_buffer.end(), data, data + size);
 
     while (m_audio_buffer.size() >= 8) {
-        auto it = std::search(m_audio_buffer.begin(), m_audio_buffer.end(),
-                              SONY_FRAME_HEADER, SONY_FRAME_HEADER + 8);
-        if (it == m_audio_buffer.end()) {
+        size_t header_idx = m_audio_buffer.size();
+        for (size_t i = 0; i + 8 <= m_audio_buffer.size(); ++i) {
+            if (is_sony_frame_sync(m_audio_buffer.data() + i, m_audio_buffer.size() - i)) {
+                header_idx = i;
+                break;
+            }
+        }
+        if (header_idx == m_audio_buffer.size()) {
             if (m_audio_buffer.size() > 7) {
                 m_audio_buffer.erase(m_audio_buffer.begin(), m_audio_buffer.end() - 7);
             }
             break;
         }
-
-        size_t header_idx = std::distance(m_audio_buffer.begin(), it);
         size_t pure_frame_size = m_audio.block_align > 0 ? m_audio.block_align : 368;
+        // Prefer the distance to the next sync header: it is exact even when the
+        // frame size differs from the probed block_align (variable-bitrate discs).
+        for (size_t cand = 64; cand <= 8192 && header_idx + cand + 8 <= m_audio_buffer.size(); ++cand) {
+            if (is_sony_frame_sync(m_audio_buffer.data() + header_idx + cand,
+                                   m_audio_buffer.size() - header_idx - cand)) {
+                pure_frame_size = cand - 8;
+                break;
+            }
+        }
         size_t total_frame_bytes = 8 + pure_frame_size;
 
         if (m_audio_buffer.size() - header_idx < total_frame_bytes) {
