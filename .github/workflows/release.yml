@@ -22,7 +22,10 @@ jobs:
   # ---------------------------------------------------------------------------
   build-linux:
     name: Linux x86_64
-    runs-on: ubuntu-latest
+    # Pin to a released LTS image: `ubuntu-latest` can track a bleeding-edge
+    # glibc, which would make the tarball refuse to start on ordinary distros
+    # (GLIBC_x.xx not found). Ubuntu 24.04 has FFmpeg 6.1 and glibc 2.39.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
