@@ -153,12 +153,88 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Publish: only on a version tag. Downloads both bundles and attaches them to
-  # a GitHub Release for the tag.
+  # macOS (Apple Silicon, arm64): built against Homebrew's FFmpeg/SDL2, then
+  # relinked with dylibbundler so the Homebrew .dylibs sit next to the binary
+  # (install names rewritten to @executable_path/lib). The bundle is ad-hoc
+  # signed — no Apple Developer certificate is assumed.
+  # ---------------------------------------------------------------------------
+  build-macos:
+    name: macOS arm64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: brew install cmake pkg-config ffmpeg sdl2 dylibbundler
+
+      - name: Configure
+        run: |
+          export PKG_CONFIG_PATH="$(brew --prefix)/opt/ffmpeg/lib/pkgconfig:$(brew --prefix)/opt/sdl2/lib/pkgconfig"
+          cmake -B build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} -DUMDPLAY_WERROR=ON
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} -j"$(sysctl -n hw.ncpu)"
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure
+
+      - name: Smoke test (headless)
+        run: |
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ./build/bin/umdplay --help || true
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+            ./build/bin/umdplay --demo --strip recent --screenshot demo.png || true
+
+      - name: Assemble bundle
+        run: |
+          set -euo pipefail
+          NAME=umdplay-${{ github.ref_name }}-macos-arm64
+          ROOT="dist/$NAME"
+          mkdir -p "$ROOT"
+          cp build/bin/umdplay "$ROOT/umdplay"
+          # ffmpeg/ffprobe are runtime helpers for --export-clip; bundle them too
+          # so the feature works without Homebrew installed.
+          cp "$(brew --prefix)/bin/ffmpeg" "$(brew --prefix)/bin/ffprobe" "$ROOT/"
+          # Copy every non-system dylib (FFmpeg, SDL2, …) these binaries need and
+          # rewrite the install names to resolve relative to the executable.
+          # One pass over all three files; dylibbundler re-signs ad-hoc
+          # afterwards (required on arm64).
+          dylibbundler -od -b \
+            -x "$ROOT/umdplay" \
+            -x "$ROOT/ffmpeg" \
+            -x "$ROOT/ffprobe" \
+            -d "$ROOT/lib" \
+            -p @executable_path/lib
+          cat > "$ROOT/umdplay.sh" <<'SH'
+          #!/bin/sh
+          # Launcher: keep the bundled dylibs on the loader search path (the
+          # binaries also resolve them via @executable_path, but this covers a
+          # relocated copy of the tree and the bundled ffmpeg helper).
+          DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+          export DYLD_LIBRARY_PATH="$DIR/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          exec "$DIR/umdplay" "$@"
+          SH
+          chmod +x "$ROOT/umdplay.sh"
+          cp README.md "$ROOT/" 2>/dev/null || true
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          ls -lh dist/
+          # Record the rewritten dependency paths for the log.
+          otool -L "$ROOT/umdplay" | head -20
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-bundle
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Publish: only on a version tag. Downloads every platform bundle and attaches
+  # them to a GitHub Release for the tag.
   # ---------------------------------------------------------------------------
   release:
     name: Publish Release
-    needs: [ build-linux, build-windows ]
+    needs: [ build-linux, build-windows, build-macos ]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -179,12 +255,16 @@ jobs:
             dist/*.zip
           generate_release_notes: true
           body: |
-            Ready-to-run **UMDPlay** builds for Linux and Windows.
+            Ready-to-run **UMDPlay** builds for Linux, Windows, and macOS (Apple Silicon).
 
             - `umdplay-${{ github.ref_name }}-linux-x86_64.tar.gz` — extract and run
               `./umdplay.sh <disc.iso>`. Shared libraries are bundled.
             - `umdplay-${{ github.ref_name }}-windows-x86_64.zip` — extract and run
               `umdplay.exe <disc.iso>`. DLLs (SDL2, FFmpeg) are bundled.
+            - `umdplay-${{ github.ref_name }}-macos-arm64.tar.gz` — extract and run
+              `./umdplay.sh <disc.iso>`. Homebrew dylibs are bundled and the
+              binary is ad-hoc signed (unsigned by an Apple Developer ID, so on
+              first launch use right-click → Open, or `xattr -dr com.apple.quarantine`).
 
             A UMD Video ISO is required at runtime. Requires OpenGL/SDL2 support.
 

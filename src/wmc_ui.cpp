@@ -36,6 +36,11 @@ const char* kFontCandidates[] = {
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "C:\\Windows\\Fonts\\segoeui.ttf",
     "C:\\Windows\\Fonts\\arial.ttf",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/Library/Fonts/Arial.ttf",
 };
 
 // ImGui's AddFontFromFileTTF calls ErrorLog() on a missing file, which asserts

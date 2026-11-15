@@ -11,7 +11,6 @@ uint32_t rd_u32(const uint8_t* p) {
 }
 
 // Sony SFO data formats we care about.
-constexpr uint16_t SFO_FMT_BINARY  = 0x0004;  // raw bytes
 constexpr uint16_t SFO_FMT_UTF8    = 0x0204;  // NUL-terminated UTF-8
 constexpr uint16_t SFO_FMT_UINT32  = 0x0404;  // little-endian uint32
 

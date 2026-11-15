@@ -69,3 +69,58 @@ jobs:
           path: |
             /tmp/wmc_ui_*.png
             /tmp/player_osd.png
+
+  build-macos:
+    name: macOS (Apple Silicon) Build
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies, FFmpeg & SDL2
+        run: |
+          brew update
+          brew install cmake pkg-config ffmpeg sdl2
+
+      - name: Configure CMake
+        # Treat project warnings as errors so CI enforces the zero-warning bar
+        # (matches the Linux and Windows jobs).
+        run: |
+          export PKG_CONFIG_PATH="$(brew --prefix)/opt/ffmpeg/lib/pkgconfig:$(brew --prefix)/opt/sdl2/lib/pkgconfig"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DUMDPLAY_WERROR=ON
+
+      - name: Build UMDPlay Executable
+        run: cmake --build build --config Release -j"$(sysctl -n hw.ncpu)"
+
+      - name: Run Tests
+        working-directory: build
+        run: ctest --output-on-failure
+
+      - name: Verify Binary & UI Render (Headless)
+        # The SDL "dummy" driver renders to an off-screen surface, so the demo
+        # strips can be screenshotted without a window server (no Xvfb here).
+        # --demo/--demo-player use synthetic data, so no copyrighted assets are
+        # needed; this catches UI/ImGui regressions on macOS on every run.
+        run: |
+          ls -lh build/bin/umdplay
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ./build/bin/umdplay || true
+          for strip in recent browse settings; do
+            SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+              ./build/bin/umdplay --demo --strip "$strip" \
+                                  --screenshot "/tmp/wmc_ui_${strip}.png"
+            test -s "/tmp/wmc_ui_${strip}.png"
+            ls -lh "/tmp/wmc_ui_${strip}.png"
+          done
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+            ./build/bin/umdplay --demo-player --screenshot /tmp/player_osd.png
+          test -s /tmp/player_osd.png
+          ls -lh /tmp/player_osd.png
+
+      - name: Upload UI Screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-ui-preview
+          path: |
+            /tmp/wmc_ui_*.png
+            /tmp/player_osd.png

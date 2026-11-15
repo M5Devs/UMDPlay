@@ -282,7 +282,6 @@ private:
     float  m_seek_preview = 0.0f;   // scrub position (0..1) while dragging
     HubMode m_last_strip = HubMode::Recent;
     int    m_focus = 0;             // 0 = categories, 1 = tiles, 2 = panel
-    int    m_browse_cursor = 0;
     float  m_logo_spin = 0.0f;      // UMD logo rotation (radians)
 
     // Player gesture HUD state.

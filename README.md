@@ -124,6 +124,8 @@ Tagged releases ship ready-to-run bundles on the
   (shared libraries bundled).
 - **Windows x86_64** — `.zip`; extract and run `umdplay.exe <disc.iso>`
   (MinGW runtime, SDL2 and FFmpeg DLLs bundled).
+- **macOS arm64** (Apple Silicon) — `.tar.gz`; extract and run
+  `./umdplay.sh <disc.iso>` (Homebrew FFmpeg/SDL2 dylibs bundled, ad-hoc signed).
 
 ### Prerequisites (Ubuntu / Debian)
 
@@ -176,6 +178,25 @@ cd build && ctest --output-on-failure
 
 Run `umdplay.exe` from a MINGW64 shell (or copy the MinGW/SDL2/FFmpeg DLLs
 next to it); the release `.zip` already bundles them.
+
+### macOS (Apple Silicon)
+
+The sources are portable to macOS (the POSIX branches compile unchanged under
+Apple Clang). With [Homebrew](https://brew.sh):
+
+```bash
+brew install cmake pkg-config ffmpeg sdl2
+
+export PKG_CONFIG_PATH="$(brew --prefix)/opt/ffmpeg/lib/pkgconfig:$(brew --prefix)/opt/sdl2/lib/pkgconfig"
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DUMDPLAY_WERROR=ON
+cmake --build build -j"$(sysctl -n hw.ncpu)"
+cd build && ctest --output-on-failure
+```
+
+The release `.tar.gz` bundles the Homebrew `.dylibs` (relinked with
+`dylibbundler`), so no Homebrew install is needed at runtime. It is ad-hoc
+signed but not notarized: on first launch, right-click the app and choose
+**Open**, or run `xattr -dr com.apple.quarantine umdplay`.
 
 ### Strict / sanitizer builds (what CI enforces)
 

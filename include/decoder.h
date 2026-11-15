@@ -100,11 +100,12 @@ public:
     }
 
     // Human-readable video codec name ("h264", ...), or "" when unknown.
+    // Uses the codec id (stable API) rather than AVCodecContext::codec, which
+    // newer FFmpeg releases deprecate.
     const char* video_codec_name() const {
-        return (m_video.codec_ctx && m_video.codec_ctx->codec &&
-                m_video.codec_ctx->codec->name)
-                   ? m_video.codec_ctx->codec->name
-                   : "";
+        if (!m_video.codec_ctx) return "";
+        const char* n = avcodec_get_name(m_video.codec_ctx->codec_id);
+        return n ? n : "";
     }
 
     // Detected ATRAC3+ frame stride in bytes (SONY_FRAME_STRIDE_DEFAULT when
