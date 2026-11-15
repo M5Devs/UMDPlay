@@ -19,7 +19,9 @@ artifacts/
 *.vbo
 *.ppm
 *.png
-!player_osd_preview.png
+# Keep the curated README/showcase images under version control.
+!screenshots/*.png
+!docs/*.png
 *.gif
 *.wav
 *.bin

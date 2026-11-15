@@ -14,6 +14,16 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # option so a local build can opt in without hand-rolling flags.
 option(UMDPLAY_WERROR "Treat project warnings as errors" OFF)
 
+# AddressSanitizer + UndefinedBehaviorSanitizer + LeakSanitizer for the project
+# targets. Mirrors the flags used for local verification; see tests/lsan.supp
+# for the system-library leak suppressions (SDL2/dbus, Mesa/llvmpipe).
+option(UMDPLAY_SANITIZE "Build with ASan + UBSan (+ LSan)" OFF)
+
+if(UMDPLAY_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 include_directories(${PROJECT_SOURCE_DIR}/include)
 include_directories(${PROJECT_SOURCE_DIR}/third_party)
 

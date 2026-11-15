@@ -1,82 +1,180 @@
-# UMDPlay (UMD Video Player)
+# UMDPlay &nbsp;·&nbsp; UMD Video Preservation Engine
+
+**Play and preserve Sony UMD Video discs straight from `.iso` or `.chd` — no
+firmware, no emulator, no extraction.**
 
 [![CI Build](https://github.com/M5Devs/UMDPlay/actions/workflows/ci.yml/badge.svg)](https://github.com/M5Devs/UMDPlay/actions/workflows/ci.yml)
-![License: GPL v2](https://img.shields.io/badge/License-GPLv2-blue.svg)
+[![License: GPL v2](https://img.shields.io/badge/License-GPLv2-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)
-![Status](https://img.shields.io/badge/Status-Phase%203%20Complete-brightgreen)
-![Language](https://img.shields.io/badge/Language-C%2B%2B17-orange)
-![Build System](https://img.shields.io/badge/Build-CMake-red)
+![Language](https://img.shields.io/badge/C%2B%2B-17-orange)
+![Build](https://img.shields.io/badge/Build-CMake-red)
 ![UI](https://img.shields.io/badge/UI-WMC%2010--foot-blueviolet)
+![No firmware](https://img.shields.io/badge/Firmware-not%20required-brightgreen)
 ![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen)
 
-> A lightweight, cross-platform C++17 library and standalone media player designed to parse, decode, and play **UMD Video ISOs** on the fly without disk extraction — the missing link in PSP preservation.
-
-The ultimate goal of this project is to achieve a stable, low-overhead playback layer for UMD Video content that can be seamlessly integrated into existing PSP emulators (such as **PPSSPP**) or used as an independent preservation tool.
+**Pure C++17 · FFmpeg + SDL2 · zero PSP firmware required**
 
 ---
 
-## 🚀 Vision & Motivation
+## 📸 Screenshots
 
-While PlayStation Portable (PSP) game emulation has reached near-perfection, native support for **UMD Video ISOs** remains largely unsupported across all major emulators.
+| Windows Media Center Hub | In-player OSD & Settings |
+|:---:|:---:|
+| ![WMC Hub](screenshots/wmc_hub.png) | ![Player OSD](screenshots/player_osd.png) |
+| Cover-art carousel, category strips, per-disc actions | Glossy auto-hiding transport bar + live Settings overlay |
 
-UMD Video discs use a specific filesystem structure rooted in the `UMD_VIDEO/` directory, containing:
-- **MPEG Program Stream (`.MPS`)** containers with **H.264 AVC or MPEG-2** video tracks
-- **ATRAC3plus** audio formats packed inside proprietary Sony **Private Stream 1 (`0xBD`)**
-- Interactive menu overlays built on **`.RCO` / `.VBO`** assets
+| Native `.RCO` Disc Menu — main | Native `.RCO` Disc Menu — chapters |
+|:---:|:---:|
+| ![RCO main menu](screenshots/rco_menu_main.png) | ![RCO chapter menu](screenshots/rco_menu_chapters.png) |
+| The disc's own `main_menu` page, driven by its VSMX script | Its `chapter1_menu` page — buttons fire the disc's `onPush` handlers |
 
-**UMDPlay** bridges this gap by decoding streams directly in memory via FFmpeg `AVIOContext`, eliminating the need for multi-gigabyte disk extraction. Disc images are opened through a small `DiscReader` abstraction, so both raw **`.iso`** and compressed **`.chd`** (MAME Compressed Hunks of Data) files work identically — see the [CHD Compression Guide](docs/CHD_GUIDE.md) before you compress anything.
+> All four shots are rendered headlessly (`SDL_VIDEODRIVER=dummy`) from a real
+> Region-2 UMD-Video disc (*Miku no Hi 39's Giving Day*). No copyrighted media
+> is committed — the PNGs are UI chrome only.
 
 ---
 
-## 🛠️ Tech Stack & Dependencies
+## 🚀 What is UMDPlay?
+
+PlayStation Portable *game* emulation is essentially solved, but **UMD Video**
+discs — PSP movies, concerts and interactive comics — are still orphaned:
+emulators boot the game, and generic media players choke on the proprietary
+Sony packaging.
+
+**UMDPlay** is the missing playback layer. It opens a UMD `.iso`/`.chd`
+directly, parses the disc's real filesystem, demuxes the MPEG-PS `.MPS`
+streams in memory through a custom FFmpeg `AVIOContext`, and decodes both the
+**H.264** video and the **ATRAC3+** audio — then presents them in a couch-ready
+Windows Media Center shell, complete with the disc's **own interactive menus**.
+
+The long-term goal is a stable, low-overhead playback core that drops straight
+into PSP emulators such as **PPSSPP** (GPLv2 was chosen for exactly this
+license compatibility).
+
+### Disc families supported
+
+| Family | Root tree | Contents |
+|---|---|---|
+| **UMD-Video** | `UMD_VIDEO/` | `.MPS` movie/TV streams, `PLAYLIST.UMD`, `.RCO`/VSMX menus |
+| **UMD-Music** (UMD-Audio) | `UMD_AUDIO/` | Audio tracks + `PLAYLIST.UMD` (`UMDA0088`) |
+| **UMD-PG** | `UMD_VIDEO/` | Interactive visual novels — a UMD-Video disc under the hood |
+| **CHD** | — | Any of the above, wrapped in MAME Compressed Hunks of Data |
+
+---
+
+## ✨ Features
+
+**Disc & container**
+- ISO 9660/UDF **dynamic tree walk** — finds `UMD_VIDEO/`/`UMD_MUSIC/` and
+  `STREAM/` from the PVD, so discs with non-standard LBAs still load.
+- **`.iso` and `.chd`** through one `DiscReader` abstraction (libchdr backend
+  with a decompressed-hunk cache). Byte-identical playback from ISO and CHD.
+- Reads **`PARAM.SFO`**, **`PLAYLIST.UMD`** (`UMDV0088`/`UMDA0088`) and
+  **`CLPI0088`** clip info.
+
+**Decoding**
+- In-memory **MPEG-2 Program Stream** demuxing via a seekable `AVIOContext`.
+- **H.264 AVC** video, with optional **480i `yadif` deinterlacing**.
+- **Sony PSMF ATRAC3+** audio reverse-engineered from **Private Stream 1
+  (`0xBD`)** — class-byte-agnostic frame sync and a **measured** frame stride,
+  so both 696-byte (video) and 1720-byte (music) discs decode.
+
+**Windows Media Center 10-foot UI**
+- Recent / Browse / Options strips, cover-art carousel from `ICON0.PNG`,
+  per-disc actions, chapters panel and extras sub-menu.
+- Full **player transport**: pause/resume, ±10 s / ±30 s and scrub seeking with
+  keyframe-accurate resync, volume/mute, auto-hiding glossy OSD with `HH:MM:SS`.
+- **Touch & gesture** input (swipe/drag on the OSD), keyboard and gamepad.
+- **Procedural UI sound effects** — WMC navigation chimes synthesized at
+  runtime (no bundled samples); toggle in Options or `--no-ui-sounds`.
+
+**Native `.RCO` Disc Menus**
+- Renders the disc's own `.RCO` pages (embedded PNG art) and runs its **VSMX**
+  bytecode menu VM, so page switches, chapter lists and "play the feature"
+  behave exactly as the disc authored them.
+
+**Tooling**
+- `--probe` disc structure dump, `--export-clip` headless MP4 export, and
+  `--demo` / `--demo-player` synthetic-data rendering for CI screenshots.
+
+---
+
+## 🛠️ Tech stack
 
 | Component | Technology | Notes |
 |---|---|---|
 | Language | C++17 | Modern standard, max compiler compatibility |
-| Decoder | FFmpeg (libavcodec / libavformat) | In-memory stream demuxing & decoding |
-| Output & Rendering | SDL2 | Software & GPU-accelerated video/audio output |
-| 10-foot UI | Dear ImGui (SDL2 + SDLRenderer2) | Lightweight, immediate-mode WMC-style shell |
-| Image decode | stb_image / stb_image_write | PARAM.SFO art (`ICON0`/`PIC1`) + PNG screenshots |
-| Disc images | ISO 9660/UDF or CHD (libchdr) | A `DiscReader` byte-range backend picks ISO or CHD by extension |
-| Build System | CMake | Cross-platform, supports MinGW / MSVC / GCC |
+| Decoder | FFmpeg (`libavcodec`/`libavformat`/`libswscale`/`libswresample`) | In-memory demux + decode; optional `libavfilter` for yadif |
+| Output & rendering | SDL2 | Software/GPU video, audio, input |
+| 10-foot UI | Dear ImGui (SDL2 + SDLRenderer2) | Immediate-mode WMC shell |
+| Image decode | stb_image / stb_image_write | `PARAM.SFO` art (`ICON0`/`PIC1`) + PNG screenshots |
+| Disc images | ISO 9660/UDF · CHD (libchdr) | `DiscReader` backend chosen by extension |
+| Build system | CMake | GCC / Clang / MSVC / MinGW |
 
 ---
 
-## 🗺️ Roadmap
+## 🔧 Building from source
 
-- [x] **Phase 1 — ISO & UDF Parser**: navigate `UMD_VIDEO/STREAM/`, dynamically resolve LBAs and file sizes from sector 28.
-- [x] **Phase 2 — Streaming & Decoding**: in-memory streaming via custom `AVIOContext`, H.264 AVC video decoding, and Sony PSMF ATRAC3+ audio frame reverse-engineering.
-- [x] **Phase 3 — Standalone Player + WMC UI**: synced real-time A/V playback with a Windows Media Center-inspired 10-foot UI (Recent / Browse / Options strips, disc hub, cover art, transport OSD) and a headless clip-export mode.
-- [x] **Phase 3.5 — Full Playback Transport**: pause/resume (video + SDL audio), ±10 s / ±30 s and scrub-bar seeking with keyframe-accurate resync, stop-to-Hub, real-time volume/mute, and an auto-hiding glossy WMC transport OSD with `HH:MM:SS` timestamps.
-- [ ] **Phase 4 — Menu Research**: reverse-engineer interactive menus via `.RCO` / `.VBO` overlays.
-- [ ] **Phase 5 — PPSSPP Integration**: expose a clean C-style API for native upstream integration.
+### Prerequisites (Ubuntu / Debian)
 
-### Cross-disc compatibility
+```bash
+sudo apt-get update
+sudo apt-get install -y cmake build-essential pkg-config \
+                        libavformat-dev libavcodec-dev libavutil-dev \
+                        libswscale-dev libswresample-dev libsdl2-dev
+# Optional: 480i deinterlacing (yadif)
+sudo apt-get install -y libavfilter-dev
+# Optional: CJK font so Japanese disc titles render
+sudo apt-get install -y fonts-noto-cjk
+# Optional: ffmpeg CLI, needed only for --export-clip
+sudo apt-get install -y ffmpeg
+```
 
-Nothing is hardcoded to a single disc. Verified end-to-end on two very
-different Region-1/Region-2 UMD Videos — a Japanese concert disc
-(*Hatsune Miku: Project DIVA 39's Giving Day*) and a US Hollywood disc
-(*Family Guy: Blue Harvest*) — with no code changes between them:
+Dear ImGui and `stb_image` are fetched/vendored automatically by CMake; libchdr
+is fetched and statically linked for `.chd` support.
 
-| | Miku 39's Giving Day | Family Guy: Blue Harvest |
-|---|---|---|
-| TITLE (PARAM.SFO) | ミクの日感謝祭 39's Giving Day | Family Guy: Blue Harvest |
-| `.MPS` streams | 4 (main 1648 MB) | 3 (main 533 MB) |
-| Video | H.264 720×480 @ 29.97 fps | H.264 720×480 @ 29.97 fps |
-| Audio | ATRAC3+ → 44.1 kHz stereo | ATRAC3+ → 44.1 kHz stereo |
-| ATRAC3+ stride | 696 B (detected) | 696 B (detected) |
+### Build & test
 
-The ATRAC3+ frame stride is **measured from the stream** (histogramming the
-`0F D0 48 55` sync-word spacing) rather than assumed, so discs that use a
-different bitrate/frame size still demux correctly; 696 bytes is only the
-fallback for a stream too short to probe.
+```bash
+git clone https://github.com/M5Devs/UMDPlay.git
+cd UMDPlay
+
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+
+# Play any UMD image directly
+./build/bin/umdplay /path/to/movie.iso
+./build/bin/umdplay /path/to/movie.chd      # CHD works identically
+
+# Tests
+cd build && ctest --output-on-failure
+```
+
+### Strict / sanitizer builds (what CI enforces)
+
+```bash
+# Zero-warning build (the CI bar)
+cmake -B build-werror -DUMDPLAY_WERROR=ON && cmake --build build-werror -j"$(nproc)"
+
+# Address + Undefined + Leak sanitizers (suppressions in tests/lsan.supp)
+cmake -B build-san -DUMDPLAY_SANITIZE=ON && cmake --build build-san -j"$(nproc)"
+LSAN_OPTIONS=suppressions=tests/lsan.supp ctest --test-dir build-san --output-on-failure
+```
+
+### Headless (CI / Docker)
+
+```bash
+# Render a frame off-screen and exit
+SDL_AUDIODRIVER=dummy xvfb-run -a -s "-screen 0 1280x720x24" \
+    ./build/bin/umdplay movie.iso --screenshot shot.png
+```
 
 ---
 
-## 🎮 Command-Line Options
+## 🎮 Command-line options
 
 ```text
-Usage: umdplay [path_to_umd_video.iso|.chd] [options]
+Usage: umdplay [path_to_umd.iso|.chd] [options]
   --play                 start the main feature immediately
   --export-clip <mp4>    decode a clip to MP4 (H.264/AAC) and exit
   --clip-seconds <n>     clip length in seconds (default 12)
@@ -84,152 +182,106 @@ Usage: umdplay [path_to_umd_video.iso|.chd] [options]
   --start <seconds>      start at this offset
   --fullscreen           start in fullscreen (F11 / Alt+Enter toggles)
   --strip <name>         start on a hub strip: recent|browse|settings
+  --open-settings        open the player Settings overlay
+  --open-menu            open the interactive .RCO Disc Menu
+  --menu-page <name>     start the Disc Menu on a named page
+  --aspect <mode>        zoom mode: auto|16:9|4:3|fill
+  --no-ui-sounds         start with the WMC UI chimes muted
   --probe                print stream/metadata info and exit
+  --verbose              with --probe: disassemble the menu VSMX script
   --demo                 render the hub with synthetic data (no disc image)
+  --demo-player          render the player OSD over synthetic video (no disc)
 ```
 
-**Headless clip export** decodes the main `.MPS` stream and muxes H.264 video
-plus AAC audio into a standard MP4 via the `ffmpeg` CLI (no extra muxing
-dependency). This is handy for verifying decode on machines without a display:
+**Inspect a disc**
 
 ```bash
-# ~12 s from the middle of a movie, written as a playable MP4
+./build/bin/umdplay movie.iso --probe            # filesystem, streams, playlist, RCO
+./build/bin/umdplay movie.iso --probe --verbose  # + VSMX menu disassembly
+```
+
+**Export a clip (headless A/V decode proof)**
+
+```bash
+# ~12 s from the middle of the movie, muxed to a playable MP4
 ./build/bin/umdplay movie.iso --export-clip test_clip.mp4 --start 3552 --clip-seconds 12
 ffprobe test_clip.mp4
 ```
 
 ---
 
-## 🪟 Windows Media Center 10-foot UI
+## 🪟 The Windows Media Center UI
 
 The default front-end is a couch-friendly WMC shell. It launches in a clean
-**resizable window** (1280x720) — press **F11** or **Alt+Enter** (or use the
-Options strip / player OSD button) to toggle fullscreen at any time.
+resizable 1280×720 window; press **F11** / **Alt+Enter** to toggle fullscreen.
 
 Three horizontal strips, switched with **LEFT / RIGHT**:
 
 | Strip | Contents |
 |---|---|
-| **Recent Discs** | Every disc image you have opened, persisted to `~/.config/umdplay/recent.txt` (override with `$UMDPLAY_CONFIG_DIR`), shown as cover-art cards from `ICON0.PNG`. |
-| **Browse System** | A built-in `std::filesystem` folder/file browser. Navigate folders, filter to `*.iso` / `*.chd`, and open any UMD image — it loads and is added to Recent automatically. |
-| **Options** | Display Mode (Windowed / Fullscreen) and an Audio Volume / Mute slider. |
+| **Recent Discs** | Every disc you have opened, persisted to `~/.config/umdplay/recent.txt` (override with `$UMDPLAY_CONFIG_DIR`), shown as cover-art cards from `ICON0.PNG`. |
+| **Browse System** | A built-in `std::filesystem` browser; filters to `*.iso` / `*.chd` and opens any UMD image. |
+| **Options** | Display Mode, Audio Volume, Mute and the **UI Sounds** toggle. |
 
-Per-disc actions replace the raw `.MPS` file list with clean WMC choices:
-
-- **Play** — launches the Main Feature (the largest `.MPS` stream).
-- **Extras** — shown only when bonus streams exist; opens a labelled sub-menu (`Bonus Clip 1`, `Bonus Clip 2`, ...) with human-readable sizes.
-- **Options** — jumps to the Options strip.
+Per-disc actions replace the raw `.MPS` list with clean choices — **Play** (the
+main feature), **Extras** (bonus streams, when present) and **Options**.
 
 ### Controls
 
 ```text
-LEFT / RIGHT   switch strip (tabs) / move cards / adjust a setting
-UP / DOWN      move between tabs, cards and action rows
-ENTER / SPACE  open disc, enter folder, activate action
-BACKSPACE      Browse: up one directory
+LEFT / RIGHT     switch strip (tabs) / move cards / adjust a setting
+UP / DOWN        move between tabs, cards and action rows
+ENTER / SPACE    open disc, enter folder, activate action
+BACKSPACE        Browse: up one directory
 F11 / Alt+Enter  toggle fullscreen
-ESC            back one level (Hub) / return to Hub (player)
-Q              quit
+ESC              back one level (Hub) / return to Hub (player)
+Q                quit
 ```
-
-Cover art is decoded straight from the disc's PARAM.SFO `ICON0.PNG`; Japanese
-titles render via Noto Sans CJK when installed.
 
 ### Player transport
 
-Watching a UMD behaves like a polished native media player. The glossy transport
-bar fades in on any input and auto-hides after ~3 s of inactivity — but never
-while paused or while the pointer is over it.
+The glossy transport bar fades in on any input and auto-hides after ~3 s of
+inactivity — but never while paused or hovered.
 
 ```text
 SPACE                 play / pause (video clock + SDL audio pause together)
 LEFT / RIGHT          seek -10 s / +10 s
 SHIFT+LEFT/RIGHT      seek -30 s / +30 s
-drag the timeline     scrub to any position (releases into a seek)
+drag the timeline     scrub to any position
 UP / DOWN             volume -5% / +5%
 M                     mute / unmute
 T                     open the Disc Menu (when the disc ships one)
-PageUp / [            previous chapter (restart current, else step back)
-PageDown / ]          next chapter
+PageUp / [            previous chapter      PageDown / ]   next chapter
 F11 / Alt+Enter       toggle fullscreen
 ESC / BACKSPACE       stop and return to the Hub
 ```
 
 Chapters come from `PLAYLIST.UMD`: the hub's **Chapters** action opens a marker
-list for the main feature, and the player transport carries `|<` / `>|` buttons
-plus a `CH n/N` readout. Seeks snap to the exact marker timestamp.
+list, and the transport carries `|<` / `>|` buttons plus a `CH n/N` readout.
 
 ### Disc Menu (native `.RCO` pages)
 
-When the disc ships an interactive menu (`RESOURCE/*.RCO`), the player's OSD
-grows a **Menu** button and the `T` key opens the **Disc Menu**: the disc's own
-`.RCO` pages, drawn from the embedded PNG art, navigated with the arrow keys or
-D-pad (mouse hover and touch taps focus directly). Each button fires the page's
-own VSMX `onPush` handler, so page switches (`pageID`), the chapter list and
-"play the feature" all behave as the disc authored them. The focused button
-shows its `_sel` artwork and a glowing ring; `ESC`/`B` steps back a page (or
-leaves the menu at the top level) and `ENTER`/`A` activates.
-
-Seeking flushes the FFmpeg codec buffers, re-anchors the hand-demuxed PSMF
-ATRAC3+ reader on a real MPEG-PS pack boundary, resyncs video to the next
-keyframe (so a mid-GOP jump never shows corrupt macroblocks), and drops any
-stale audio still queued in SDL — no drift, no stutter on resume. Timestamps are
-shown as `HH:MM:SS / HH:MM:SS` along the timeline, with the disc title from
-`PARAM.SFO` at the top-left.
-
-![Player transport OSD](player_osd_preview.png)
+When a disc ships an interactive menu (`RESOURCE/*.RCO`), the OSD grows a
+**Menu** button and `T` opens the **Disc Menu**: the disc's own `.RCO` pages,
+drawn from embedded PNG art, navigated with the arrows / D-pad (mouse hover and
+touch taps focus directly). Each button fires the page's own VSMX `onPush`
+handler, so page switches (`pageID`), chapter lists and "play the feature" all
+behave as authored. The focused button shows its `_sel` artwork and a glowing
+ring; `ESC`/`B` steps back (or leaves at the top level), `ENTER`/`A` activates.
 
 ---
 
-## 🔧 Building from Source
+## 🗂️ Project layout
 
-### Prerequisites (Ubuntu / Debian)
-```bash
-sudo apt-get update
-sudo apt-get install -y cmake build-essential pkg-config \
-                        libavformat-dev libavcodec-dev libavutil-dev \
-                        libswscale-dev libswresample-dev libsdl2-dev
-# Optional: CJK font so Japanese disc titles render (Noto Sans CJK)
-sudo apt-get install -y fonts-noto-cjk
-# Optional: ffmpeg CLI, needed only for --export-clip
-sudo apt-get install -y ffmpeg
+```text
+include/ · src/     C++17 modules — iso_reader, decoder, disc_reader,
+                    param_sfo, playlist_parser, rco_parser, vsmx_vm,
+                    rco_menu, wmc_ui, ui_sfx, clip_export, ui_manager
+tests/              ctest suites (9) + fixtures + lsan.supp
+docs/               ARCHITECTURE.md · TESTED_DISCS.md · CHD_GUIDE.md
+screenshots/        README showcase images (headless renders)
+third_party/        vendored stb_image
 ```
-
-Dear ImGui and `stb_image` are fetched/vendored automatically by CMake.
-
-### Build Steps
-```bash
-# 1. Clone the repository
-git clone https://github.com/M5Devs/UMDPlay.git
-cd UMDPlay
-
-# 2. Configure & Build
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-
-# 3. Run directly against any UMD Video ISO
-./build/bin/umdplay /path/to/movie.iso
-
-# 4. Run the tests
-cd build && ctest --output-on-failure
-```
-
-The test suite covers the PARAM.SFO parser (`test_param_sfo`), the PSMF
-ATRAC3+ audio decoder (`test_audio_decoder`, decodes a real stream when an ISO
-is present) and the recent-discs persistence layer (`test_recent`, run in an
-isolated config dir).
-
-> On a headless machine (CI, Docker) render off-screen with Xvfb, e.g.
-> `xvfb-run -a -s "-screen 0 1280x720x24" ./build/bin/umdplay movie.iso --screenshot shot.png`.
-
----
-
-## 🖼️ Verified Decoded Frames (Proof of Concept)
-
-| Hatsune Miku: Project DIVA (39's Giving Day) | Family Guy: Blue Harvest (Star Wars Parody) |
-|:---:|:---:|
-| ![Miku](screenshots/miku1.png) | ![Family Guy](screenshots/fg1.png) |
-| *Japanese UMD Video (Concert)* | *US Commercial UMD Video (Hollywood)* |
 
 ---
 
@@ -237,32 +289,45 @@ isolated config dir).
 
 | Document | Contents |
 |---|---|
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Reverse-engineered UMD disc internals — UDF layout, `PARAM.SFO`, `PLAYLIST.UMD` (`UMDV0088`), `CLPI0088`, `.RCO` (`\0PRF`) + VSMX bytecode, and the Sony PSMF ATRAC3+ (`0xBD`) framing |
-| [`docs/CHD_GUIDE.md`](docs/CHD_GUIDE.md) | **Safe** UMD ISO → CHD compression: sector specs, the exact `chdman createdvd` command, verifying, and restoring |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Reverse-engineered UMD internals — UDF layout, `PARAM.SFO`, `PLAYLIST.UMD` (`UMDV0088`), `CLPI0088`, `.RCO` (`\0PRF`) + VSMX bytecode, Sony PSMF ATRAC3+ (`0xBD`) framing |
+| [`docs/TESTED_DISCS.md`](docs/TESTED_DISCS.md) | Every real disc tested, what it exercised, and the bugs each one exposed (compatibility matrix) |
+| [`docs/CHD_GUIDE.md`](docs/CHD_GUIDE.md) | **Safe** UMD ISO → CHD compression — sector specs, the exact `chdman createdvd` command, verifying and restoring |
+| [`AGENTS.md`](AGENTS.md) | Module map, build/test/CI commands and the technical gotchas for anyone (human or AI) working on the code |
 
 ### Compressing a UMD ISO to CHD (quick version)
 
-A UMD is a **2048-byte-sector, single-track, DVD-style** disc (~1.8 GB), so it
-must be compressed in **DVD mode**. Use `createdvd` — **never** `createcd`
-(which assumes 2352-byte CD sectors and silently breaks the image):
+A UMD is a **2048-byte-sector, single-track, DVD-style** disc, so it must be
+compressed in **DVD mode**. Use `createdvd` — **never** `createcd`:
 
 ```bash
 chdman createdvd -i movie.iso -o movie.chd    # ✅ correct for UMD
 chdman verify   -i movie.chd                  # confirm the copy is intact
 chdman extractdvd -i movie.chd -o movie.iso   # lossless restore, byte-identical
 
-# ❌ chdman createcd -i movie.iso -o movie.chd  (2352-byte CD mode — do not use)
+# ❌ chdman createcd -i movie.iso -o movie.chd  (2352-byte CD mode — breaks the image)
 ```
 
-If `chdman info -i movie.chd` reports `Unit Size: 2048` you did it right; a
-`Unit Size: 2448` means you used `createcd`. Full details, including why it
-matters, are in the [CHD Compression Guide](docs/CHD_GUIDE.md).
+If `chdman info -i movie.chd` reports `Unit Size: 2048` you did it right.
+Full details in the [CHD Compression Guide](docs/CHD_GUIDE.md).
+
+---
+
+## 🗺️ Roadmap
+
+- [x] **Phase 1 — ISO & UDF Parser**: navigate `UMD_VIDEO/STREAM/`, resolve LBAs dynamically.
+- [x] **Phase 2 — Streaming & Decoding**: in-memory `AVIOContext`, H.264 AVC, PSMF ATRAC3+ reverse-engineering.
+- [x] **Phase 3 — Standalone Player + WMC UI**: synced A/V playback, WMC 10-foot shell, headless clip export.
+- [x] **Phase 4 — Interactive Menus & Chapters**: `PLAYLIST.UMD` / `CLPI0088`, real chapters, `.RCO` object tree + VSMX menu VM.
+- [x] **Phase 4.5 — Unified `DiscReader`**: ISO + CHD via libchdr.
+- [ ] **Phase 5 — PPSSPP integration**: expose a clean C-style API for native upstream integration.
 
 ---
 
 ## 📜 License
 
-This project is licensed under the **GNU General Public License v2.0 (GPLv2)**.  
-GPLv2 was chosen specifically to ensure **license compatibility with the PPSSPP project**, enabling clean upstream integration without legal friction.
+Licensed under the **GNU General Public License v2.0 (GPLv2)** — chosen
+specifically for **license compatibility with PPSSPP**, enabling clean upstream
+integration without legal friction. See [`LICENSE`](LICENSE).
 
-*Disclaimer: This project is strictly for digital preservation and educational purposes. "PSP" and "UMD" are trademarks of Sony Interactive Entertainment Inc.*
+*Disclaimer: This project is strictly for digital preservation and educational
+purposes. "PSP" and "UMD" are trademarks of Sony Interactive Entertainment Inc.*
