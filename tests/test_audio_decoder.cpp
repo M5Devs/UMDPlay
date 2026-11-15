@@ -8,7 +8,6 @@
 #include "decoder.h"
 #include "iso_reader.h"
 
-#include <cassert>
 #include <cstdlib>
 #include <cstdint>
 #include <fstream>
@@ -87,9 +86,9 @@ int main() {
 
     // --- Default-constructed state (always runs) ---
     Decoder fresh;
-    assert(!fresh.has_video());
-    assert(!fresh.has_audio());
-    assert(fresh.get_duration() == 0.0);
+    CHECK(!fresh.has_video());
+    CHECK(!fresh.has_audio());
+    CHECK(fresh.get_duration() == 0.0);
     fresh.close();  // must be safe on an unopened decoder
 
     const std::string iso = find_iso();
@@ -121,7 +120,7 @@ int main() {
         return 1;
     }
 
-    assert(decoder.has_video());
+    CHECK(decoder.has_video());
     std::cout << "[*] Opened " << main_entry.name
               << "  fps=" << decoder.get_fps()
               << "  dur=" << decoder.get_duration() << "s\n";
@@ -155,11 +154,11 @@ int main() {
               << "  audio chunks=" << audio_chunks
               << "  pcm bytes=" << total_pcm << "\n";
 
-    assert(video_frames > 0 && "expected to decode video frames");
+    CHECK(video_frames > 0);
     if (had_audio) {
-        assert(audio_chunks > 0 && "expected ATRAC3+ audio chunks");
-        assert(total_pcm > 0 && "expected non-empty PCM");
-        assert(nonzero > 0 && "expected non-silent PCM");
+        CHECK(audio_chunks > 0);
+        CHECK(total_pcm > 0);
+        CHECK(nonzero > 0);
         std::cout << "[+] ATRAC3+ audio decoded to non-silent PCM.\n";
     } else {
         std::cout << "[skip] Stream reports no audio track.\n";
