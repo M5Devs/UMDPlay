@@ -62,6 +62,15 @@ pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
 pkg_check_modules(AVFILTER libavfilter)
 pkg_check_modules(SDL2 REQUIRED sdl2)
 
+# On macOS the SDL2main shim is unnecessary: it only redirects main() to
+# SDL_main() on Windows. Homebrew's SDL2 (the sdl2-compat layer) nevertheless
+# advertises -lSDL2main in sdl2.pc, and that archive is not linkable there, so
+# drop it to avoid "ld: library 'SDL2main' not found".
+if(APPLE)
+    list(REMOVE_ITEM SDL2_LIBRARIES SDL2main)
+    list(REMOVE_ITEM SDL2_STATIC_LIBRARIES SDL2main)
+endif()
+
 include_directories(
     ${AVFORMAT_INCLUDE_DIRS} ${AVCODEC_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS}
     ${SWSCALE_INCLUDE_DIRS} ${SWRESAMPLE_INCLUDE_DIRS} ${AVFILTER_INCLUDE_DIRS}
