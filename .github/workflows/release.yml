@@ -111,8 +111,10 @@ jobs:
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL3
             mingw-w64-x86_64-ffmpeg
             zip
+            unzip
 
       - name: Configure
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} -DUMDPLAY_WERROR=ON
@@ -146,11 +148,53 @@ jobs:
           # Collect the MinGW runtime and SDL2/FFmpeg DLLs the exe links against.
           ldd build/bin/umdplay.exe | awk '{print $3}' | grep -E '^/mingw64/' | sort -u | \
           while read -r dll; do cp -L "$dll" "$ROOT/"; done
+          # MSYS2 may build SDL2 as sdl2-compat, which LoadLibrary()s SDL3.dll at
+          # runtime -- ldd can't see it, so copy it explicitly or the bundle fails
+          # on a clean PC with "Failed loading SDL3 library" (issue #12).
+          for dll in SDL3.dll libwinpthread-1.dll; do
+            [ -f "/mingw64/bin/$dll" ] && cp -L "/mingw64/bin/$dll" "$ROOT/" || true
+          done
           # ffmpeg/ffprobe are runtime helpers for --export-clip.
           cp /mingw64/bin/ffmpeg.exe /mingw64/bin/ffprobe.exe "$ROOT/" 2>/dev/null || true
           cp README.md "$ROOT/" 2>/dev/null || true
+          # Fail the build if the exe still imports a DLL we did not bundle, so a
+          # missing-DLL release can never ship.
+          for dll in $(ldd build/bin/umdplay.exe | awk '{print $3}' | grep -E '^/mingw64/' | sort -u); do
+            base=$(basename "$dll")
+            [ -f "$ROOT/$base" ] || { echo "MISSING DLL: $base"; exit 1; }
+          done
           ( cd dist && zip -r -q "$NAME.zip" "$NAME" )
           ls -lh dist/
+
+      - name: Verify bundle runs on a clean PATH (no MinGW)
+        # Extract the shipped .zip somewhere isolated and run it with /mingw64/bin
+        # stripped from PATH and the MinGW_* variables cleared, so only the DLLs we
+        # bundled can satisfy the loader. This reproduces a clean Windows 11 PC
+        # (issue #12: "Failed loading SDL3 library" / 0xc0000142) and fails the
+        # build if any runtime dependency is missing.
+        run: |
+          set -e
+          ZIP=$(ls dist/*.zip | head -1)
+          TMP=$(mktemp -d)
+          unzip -q "$ZIP" -d "$TMP"
+          DIR=$(dirname "$(find "$TMP" -name umdplay.exe | head -1)")
+          echo "Clean-room dir: $DIR"
+          # Force a genuinely clean environment: drop every /mingw64 path entry and
+          # the MinGW_* variables the msys2 action exports.
+          CLEANPATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v '/mingw64' | paste -sd: -)
+          for v in $(env | awk -F= '/^MINGW/{print $1}'); do unset "$v"; done
+          cd "$DIR"
+          # --help prints usage and exits 1 (parse_args returns false); assert the
+          # output, which also proves the exe started (no DLL error).
+          PATH="$CLEANPATH" SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+            ./umdplay.exe --help 2>&1 | tee help.txt || true
+          grep -q "Usage: umdplay" help.txt || { echo "umdplay.exe --help produced no usage text"; exit 1; }
+          # The demo renderer needs SDL + ImGui + stb_image; a PNG means the whole
+          # stack (including the SDL3 shim, if any) loaded from the bundle.
+          PATH="$CLEANPATH" SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+            ./umdplay.exe --demo --screenshot demo.png
+          test -s demo.png || { echo "demo screenshot was not produced"; exit 1; }
+          echo "Clean-PATH bundle verification passed."
 
       - name: Upload bundle
         uses: actions/upload-artifact@v4

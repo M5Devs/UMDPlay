@@ -194,6 +194,15 @@ UMDPlay.
     UMD-Video one); the UMD-Video SFO is the **later** sector. A disc with no
     `DISC_ID`/`CATEGORY` (e.g. Blue Harvest) is normal — report `(none)`.
 
+12. **MSYS2's `SDL2` is really `sdl2-compat` — the Windows bundle must ship
+    `SDL3.dll`.** On the CI runner `pacman -S mingw-w64-x86_64-SDL2` is silently
+    swapped for `mingw-w64-x86_64-sdl2-compat` (its `SDL2.dll` `LoadLibrary`s
+    `SDL3.dll` at runtime), so `ldd` never lists `SDL3.dll` and a naive DLL sweep
+    ships a bundle that dies with *"Failed loading SDL3 library"* /
+    `0xc0000142` on a clean Windows 11 PC. `release.yml` copies `SDL3.dll`
+    explicitly, then re-runs the packaged `.exe` with `/mingw64/bin` stripped
+    from `PATH` to prove the bundle is self-contained.
+
 ---
 
 ## Coding style
