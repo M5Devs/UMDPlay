@@ -221,10 +221,32 @@ jobs:
           - runner: macos-15-intel
             arch: x86_64
     runs-on: ${{ matrix.runner }}
+    env:
+      # Homebrew hardening for CI: never self-update (a `brew update` can pull
+      # formula versions with no bottle and force a from-source build — the
+      # ~90-minute failure mode), and skip the post-install cleanup and
+      # dependent-rebuild passes. With these set, the bottled cmake/ffmpeg/sdl2
+      # install in seconds.
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+      HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache Homebrew downloads
+        # Cache the bottle download cache (ffmpeg drags in ~1 GB of deps) so
+        # repeat runs skip re-fetching. It is content-addressed, so a stale entry
+        # is harmless: brew re-downloads only what actually changed.
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew/downloads
+          key: brew-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('.github/workflows/release.yml') }}
+          restore-keys: |
+            brew-${{ runner.os }}-${{ matrix.arch }}-
+
       - name: Install build dependencies
+        # Install bottles (prebuilt) only; no `brew update`, so we stay on the
+        # bottled versions that match the runner image.
         run: brew install cmake pkg-config ffmpeg sdl2 dylibbundler
 
       - name: Configure
