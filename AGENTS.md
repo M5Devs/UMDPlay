@@ -30,14 +30,17 @@ adding a per-disc constant, stop and make it dynamic.
 
 ```text
 CMakeLists.txt          Build: umdplay_core, umdplay_ui_sfx, imgui_backends,
-                        stb_image libs + umdplay exe + 9 test executables
+                        stb_image + umdplay_logo libs + umdplay exe + 9 test exes
+cmake/EmbedAsset.cmake  Turns a binary file into a C++ byte array (build step)
 include/                Public headers (one per module)
 src/                    Module implementations + main.cpp (CLI/app)
 tests/                  ctest suites (CHECK-macro style), fixtures/, lsan.supp
 docs/                   ARCHITECTURE.md, TESTED_DISCS.md, CHD_GUIDE.md
+assets/                 Brand art: umdplay_logo.png (official, embedded in the
+                        binary), umdplay_flat.png, umdplay.ico + umdplay.rc (Windows)
 screenshots/            README showcase images (tracked; everything else *.png ignored)
 third_party/            Vendored stb_image (single header)
-.github/workflows/      ci.yml (Linux GCC: -Werror build, ctest, Xvfb UI render)
+.github/workflows/      ci.yml (Linux GCC + macOS arm64/x86_64: -Werror, ctest, Xvfb)
 ```
 
 ---
@@ -60,6 +63,7 @@ third_party/            Vendored stb_image (single header)
 | **ui_manager** | `include/ui_manager.h`, `src/ui_manager.cpp` | SDL window/renderer, video texture upload, audio device + queue, demo textures. |
 | **clip_export** | `include/clip_export.h`, `src/clip_export.cpp` | Headless decode → MP4 (shells out to the `ffmpeg` CLI for H.264/AAC muxing). |
 | **gesture** / **aspect** / **recent** | matching headers | Touch/mouse gesture recognition, zoom/aspect modes, recent-disc persistence. |
+| **logo (embedded)** | `include/umdplay_logo.h`, generated `umdplay_logo_data.cpp` | `assets/umdplay_logo.png` baked into the binary by `cmake/EmbedAsset.cmake`; drawn as the WMC hub header mark and set as the SDL window icon. |
 
 `main.cpp` wires them together: parse args → open disc → build hub state →
 event loop → dispatch `WmcAction`s.
@@ -211,8 +215,10 @@ UMDPlay.
 
 - **Never commit media or dumps.** `.gitignore` blocks `*.iso`, `*.chd`, `*.mp4`,
   `*.wav`, `*.bin`, `*.oma`, `*.at3`, `*.rco`, `*.mps`, `*.pmf`, `*.clp`,
-  `*.vbo` and all `*.png` — **except** `screenshots/*.png` and `docs/*.png`,
-  which are the curated README images. Keep the repo root clean of stray PNGs.
+  `*.vbo` and all `*.png` — **except** `screenshots/*.png`, `docs/*.png` and
+  `assets/*.png`, which are the curated README images and the official brand art
+  (`umdplay_logo.png` is embedded in the binary; `umdplay.ico` feeds the Windows
+  `.exe`). Keep the repo root clean of stray PNGs.
 - Test discs are copyrighted and fetched out-of-band; tests must skip when the
   image is absent. Do not add them to the repository.
 - Build directories (`build/`, `build-*/`) and `.openhands/` are ignored.

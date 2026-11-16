@@ -1,4 +1,8 @@
 #include "ui_manager.h"
+
+#include "stb_image.h"
+#include "umdplay_logo.h"   // embedded official logo PNG
+
 #include <iostream>
 
 UiManager::UiManager() {}
@@ -61,6 +65,22 @@ bool UiManager::init(const std::string& title, int width, int height) {
 
     m_initialized = true;
     return true;
+}
+
+void UiManager::set_window_icon() {
+    if (!m_window) return;
+    int w = 0, h = 0, comp = 0;
+    unsigned char* px = stbi_load_from_memory(
+        umdplay_logo_png, static_cast<int>(umdplay_logo_png_len), &w, &h, &comp, 4);
+    if (!px) return;
+    // stb yields RGBA bytes; on little-endian that is SDL's ABGR8888 packing.
+    SDL_Surface* icon = SDL_CreateRGBSurfaceWithFormatFrom(
+        px, w, h, 32, w * 4, SDL_PIXELFORMAT_ABGR8888);
+    if (icon) {
+        SDL_SetWindowIcon(m_window, icon);   // SDL copies the pixels
+        SDL_FreeSurface(icon);
+    }
+    stbi_image_free(px);
 }
 
 void UiManager::update_texture_size(int width, int height) {

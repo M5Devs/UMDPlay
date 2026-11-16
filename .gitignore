@@ -22,6 +22,8 @@ artifacts/
 # Keep the curated README/showcase images under version control.
 !screenshots/*.png
 !docs/*.png
+# Official brand art: embedded in the binary and shipped with release bundles.
+!assets/*.png
 *.gif
 *.wav
 *.bin

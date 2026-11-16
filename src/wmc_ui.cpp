@@ -4,6 +4,7 @@
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"
 #include "stb_image.h"
+#include "umdplay_logo.h"      // embedded official logo (header mark + window icon)
 
 #include <algorithm>
 #include <cmath>
@@ -48,6 +49,25 @@ const char* kFontCandidates[] = {
 bool file_exists(const char* path) {
     std::error_code ec;
     return path && std::filesystem::exists(path, ec);
+}
+
+// Decode the embedded official logo PNG into a fresh renderer texture. The
+// caller owns it; null on failure so the header can fall back to the word mark.
+SDL_Texture* make_logo_texture(SDL_Renderer* r) {
+    if (!r) return nullptr;
+    int w = 0, h = 0, comp = 0;
+    unsigned char* px = stbi_load_from_memory(
+        umdplay_logo_png, static_cast<int>(umdplay_logo_png_len), &w, &h, &comp, 4);
+    if (!px) return nullptr;
+    SDL_Texture* tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA32,
+                                         SDL_TEXTUREACCESS_STATIC, w, h);
+    if (tex) {
+        SDL_UpdateTexture(tex, nullptr, px, w * 4);
+        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
+    }
+    stbi_image_free(px);
+    return tex;
 }
 
 ImU32 with_alpha(ImU32 c, float a) {
@@ -146,6 +166,7 @@ bool WmcUi::init(SDL_Window* window, SDL_Renderer* renderer,
     m_font_title = m_font_body;
     m_font_huge  = m_font_body;
 
+    m_logo_tex = make_logo_texture(m_renderer);
     m_initialized = true;
     return true;
 }
@@ -160,6 +181,7 @@ void WmcUi::close() {
         ImGui::DestroyContext();
         m_initialized = false;
     }
+    if (m_logo_tex) { SDL_DestroyTexture(m_logo_tex); m_logo_tex = nullptr; }
     m_font_title = m_font_huge = m_font_body = nullptr;
 }
 
@@ -277,72 +299,41 @@ void WmcUi::draw_aurora(ImDrawList* dl, float w, float h, float t, SDL_Texture* 
 }
 
 // ---------------------------------------------------------------------------
-// Animated 2D spinning UMD logo (top-left)
+// Official UMD logo (top-left header)
 // ---------------------------------------------------------------------------
-// A flat/glassy UMD shell: rounded top, flat bottom (the UMD "cartridge"
-// silhouette) with a concentric inner disc that rotates continuously.
+// Draws the embedded glossy UMD cartridge. A gentle breathing scale keeps a
+// little life in the header; `loading` (ISO read in progress) also spins a
+// soft accent halo behind the artwork. Draws nothing if the texture failed
+// to load, leaving the "UMDPlay" word mark on its own.
 void WmcUi::draw_umd_logo(ImDrawList* dl, float cx, float cy, float r, float t,
                           bool loading) {
-    // Spin: idle ~0.35 rad/s, loading ~5 rad/s. Accumulated in m_logo_spin.
+    if (!m_logo_tex) return;
     m_logo_spin += (loading ? 5.0f : 0.35f) * ImGui::GetIO().DeltaTime;
 
-    const float shell_w = r * 2.0f;
-    const float shell_h = r * 1.7f;
-    const ImVec2 s0(cx - shell_w * 0.5f, cy - shell_h * 0.5f);
-    const ImVec2 s1(cx + shell_w * 0.5f, cy + shell_h * 0.5f);
-    // UMD shell: heavily rounded top, small-radius flat bottom.
-    const float top_r = shell_w * 0.46f;
-    const float bot_r = shell_w * 0.12f;
+    const float half = r * (1.0f + 0.015f * std::sin(t * 1.6f));
+    const ImVec2 a(cx - half, cy - half);
+    const ImVec2 b(cx + half, cy + half);
 
-    // Drop shadow.
-    dl->AddRectFilled(ImVec2(s0.x + 4, s0.y + 7), ImVec2(s1.x + 4, s1.y + 7),
-                      IM_COL32(0, 0, 0, 120), top_r);
-
-    // Glassy shell body (cobalt gradient) with a highlight sweep.
-    dl->AddRectFilledMultiColor(s0, s1, IM_COL32(60, 130, 205, 255),
-                                IM_COL32(60, 130, 205, 255),
-                                IM_COL32(12, 34, 76, 255), IM_COL32(12, 34, 76, 255));
-    // Cover the flat bottom corners' rounding so the silhouette reads as UMD.
-    dl->AddRectFilled(ImVec2(s0.x, s1.y - bot_r * 2.0f),
-                      ImVec2(s1.x, s1.y), IM_COL32(18, 44, 92, 255), bot_r);
-    dl->AddRect(s0, s1, with_alpha(kGlassHi, 0.55f), top_r, 0, 1.6f);
-
-    // Glass highlight across the top half.
-    dl->AddRectFilledMultiColor(ImVec2(s0.x + 4, s0.y + 4),
-                                ImVec2(s1.x - 4, cy),
-                                IM_COL32(255, 255, 255, 60), IM_COL32(255, 255, 255, 60),
-                                IM_COL32(255, 255, 255, 0), IM_COL32(255, 255, 255, 0));
-
-    // Inner rotating disc.
-    const float disc_r = r * 0.62f;
-    const ImVec2 dc(cx, cy + shell_h * 0.04f);
-    dl->AddCircleFilled(dc, disc_r, IM_COL32(6, 16, 38, 255), 64);
-    dl->AddCircle(dc, disc_r, with_alpha(kGlassHi, 0.35f), 64, 1.4f);
-
-    // The spinning "data" side: a bright arc + a few spokes that rotate.
-    const float a0 = m_logo_spin;
-    const int seg = 28;
-    for (int i = 0; i < seg; ++i) {
-        const float f0 = a0 + (static_cast<float>(i) / seg) * 6.2831853f;
-        const float f1 = a0 + (static_cast<float>(i + 1) / seg) * 6.2831853f;
-        const float lum = 0.35f + 0.65f * (0.5f + 0.5f * std::sin(f0 * 1.0f + t * 0.6f));
-        dl->AddTriangleFilled(ImVec2(dc.x + std::cos(f0) * disc_r * 0.62f,
-                                     dc.y + std::sin(f0) * disc_r * 0.62f),
-                              ImVec2(dc.x + std::cos(f1) * disc_r * 0.62f,
-                                     dc.y + std::sin(f1) * disc_r * 0.62f),
-                              dc,
-                              with_alpha(kAccent, 0.18f * lum));
+    if (loading) {
+        // Soft rotating halo while the disc is being read.
+        const int seg = 24;
+        for (int i = 0; i < seg; ++i) {
+            const float f0 = m_logo_spin + (static_cast<float>(i) / seg) * 6.2831853f;
+            const float f1 = m_logo_spin + (static_cast<float>(i + 1) / seg) * 6.2831853f;
+            const float lum = 0.35f + 0.65f * (0.5f + 0.5f * std::sin(f0 + t * 0.6f));
+            dl->AddTriangleFilled(ImVec2(cx + std::cos(f0) * half * 1.09f,
+                                         cy + std::sin(f0) * half * 1.09f),
+                                  ImVec2(cx + std::cos(f1) * half * 1.09f,
+                                         cy + std::sin(f1) * half * 1.09f),
+                                  ImVec2(cx, cy),
+                                  with_alpha(kAccent, 0.16f * lum));
+        }
     }
-    for (int k = 0; k < 4; ++k) {
-        const float ang = a0 * 1.5f + k * 1.5708f;
-        dl->AddLine(dc,
-                    ImVec2(dc.x + std::cos(ang) * disc_r * 0.85f,
-                           dc.y + std::sin(ang) * disc_r * 0.85f),
-                    with_alpha(kAccent, 0.45f), 2.0f);
-    }
-    // Spindle hole.
-    dl->AddCircleFilled(dc, disc_r * 0.16f, IM_COL32(2, 8, 20, 255), 32);
-    dl->AddCircle(dc, disc_r * 0.16f, with_alpha(kGlassHi, 0.5f), 32, 1.2f);
+
+    dl->AddImageQuad(reinterpret_cast<ImTextureID>(m_logo_tex),
+                     ImVec2(a.x, a.y), ImVec2(b.x, a.y),
+                     ImVec2(b.x, b.y), ImVec2(a.x, b.y),
+                     ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1));
 }
 
 // ---------------------------------------------------------------------------
@@ -874,9 +865,9 @@ WmcInput WmcUi::render_hub(SDL_Texture* video_tex, int video_w, int video_h,
     draw_aurora(dl, w, h, t, sel ? sel->pic1 : nullptr);
 
     // --- Header: animated UMD logo (top-left) + clock (top-right) ---
-    draw_umd_logo(dl, 92.0f, 74.0f, 42.0f, t, loading);
-    dl->AddText(m_font_huge, 30.0f, ImVec2(150, 50), kTextPrimary, "UMDPlay");
-    dl->AddText(m_font_body, 13.0f, ImVec2(152, 84), kTextDim,
+    draw_umd_logo(dl, 98.0f, 72.0f, 62.0f, t, loading);
+    dl->AddText(m_font_huge, 30.0f, ImVec2(182, 46), kTextPrimary, "UMDPlay");
+    dl->AddText(m_font_body, 13.0f, ImVec2(184, 82), kTextDim,
                 (std::string("UMD VIDEO  ") + kBullet + "  PRESERVATION LIBRARY").c_str());
     draw_clock(dl, w, h);
 

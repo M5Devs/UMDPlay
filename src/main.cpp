@@ -476,6 +476,7 @@ int main(int argc, char** argv) {
         std::cerr << "[-] Failed to initialize SDL window/renderer!\n";
         return 1;
     }
+    ui.set_window_icon();
     ui.set_fullscreen(opt.fullscreen);
 
     WmcUi wmc;

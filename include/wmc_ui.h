@@ -268,6 +268,7 @@ private:
     SDL_Renderer* m_renderer = nullptr;
     bool          m_initialized = false;
     bool          m_imgui_ready = false;
+    SDL_Texture*  m_logo_tex = nullptr;   // official logo (embedded PNG)
 
     ImFont* m_font_title = nullptr;
     ImFont* m_font_huge  = nullptr;

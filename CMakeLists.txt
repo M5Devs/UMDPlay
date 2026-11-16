@@ -155,6 +155,28 @@ endforeach()
 add_library(stb_image STATIC src/stb_impl.cpp)
 target_include_directories(stb_image PUBLIC ${PROJECT_SOURCE_DIR}/third_party)
 
+# --- Official logo (embedded PNG) ------------------------------------------
+# Bake assets/umdplay_logo.png into a static library so the WMC header mark and
+# the SDL window icon work from a bare release binary (the bundles ship no
+# assets/ directory). cmake/EmbedAsset.cmake turns the PNG into a byte array.
+set(UMDPLAY_LOGO_PNG  ${PROJECT_SOURCE_DIR}/assets/umdplay_logo.png)
+set(UMDPLAY_LOGO_DATA ${CMAKE_BINARY_DIR}/generated/umdplay_logo_data.cpp)
+add_custom_command(
+    OUTPUT  ${UMDPLAY_LOGO_DATA}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/generated
+    COMMAND ${CMAKE_COMMAND}
+            -DINPUT=${UMDPLAY_LOGO_PNG}
+            -DOUTPUT=${UMDPLAY_LOGO_DATA}
+            -DSYMBOL=umdplay_logo_png
+            -P ${PROJECT_SOURCE_DIR}/cmake/EmbedAsset.cmake
+    DEPENDS ${UMDPLAY_LOGO_PNG} ${PROJECT_SOURCE_DIR}/cmake/EmbedAsset.cmake
+    COMMENT "Embedding assets/umdplay_logo.png"
+    VERBATIM
+)
+add_library(umdplay_logo STATIC ${UMDPLAY_LOGO_DATA})
+target_include_directories(umdplay_logo PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_compile_options(umdplay_logo PRIVATE ${UMDPLAY_WARN_FLAGS})
+
 # --- UMDPlay core (decoder + ISO reader + SFO parser), shared by app & tests ---
 add_library(umdplay_core STATIC
     src/disc_reader.cpp
@@ -202,10 +224,20 @@ add_executable(umdplay
     src/rco_texture.cpp
 )
 target_link_libraries(umdplay PRIVATE
-    umdplay_core umdplay_ui_sfx imgui_backends stb_image
+    umdplay_core umdplay_ui_sfx imgui_backends stb_image umdplay_logo
     ${SDL2_LIBRARIES}
 )
 target_compile_options(umdplay PRIVATE ${UMDPLAY_WARN_FLAGS})
+
+# Windows: attach the official icon to umdplay.exe via a resource script. The
+# RC compiler resolves "umdplay.ico" relative to assets/, next to the .rc. Other
+# platforms use the runtime window icon (UiManager::set_window_icon).
+if(WIN32)
+    enable_language(RC)
+    target_sources(umdplay PRIVATE assets/umdplay.rc)
+    set_source_files_properties(assets/umdplay.rc PROPERTIES
+        COMPILE_FLAGS "-I\"${PROJECT_SOURCE_DIR}/assets\"")
+endif()
 
 # --- Tests ---
 enable_testing()

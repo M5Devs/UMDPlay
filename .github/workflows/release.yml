@@ -55,6 +55,9 @@ jobs:
           ROOT="dist/$NAME"
           mkdir -p "$ROOT/lib"
           cp build/bin/umdplay "$ROOT/"
+          # Ship the official brand mark next to the binary (the runtime window
+          # icon is embedded in the executable).
+          cp assets/umdplay_logo.png "$ROOT/umdplay.png"
           # Bundle the non-core shared libraries so the tarball is portable.
           ldd build/bin/umdplay | awk '{print $3}' | grep -E '^/' | sort -u | \
           while read -r lib; do
@@ -137,6 +140,9 @@ jobs:
           ROOT="dist/$NAME"
           mkdir -p "$ROOT"
           cp build/bin/umdplay.exe "$ROOT/"
+          # The .exe already carries the official icon (compiled in from
+          # assets/umdplay.rc); ship the PNG too for launchers/shortcuts.
+          cp assets/umdplay_logo.png "$ROOT/umdplay.png"
           # Collect the MinGW runtime and SDL2/FFmpeg DLLs the exe links against.
           ldd build/bin/umdplay.exe | awk '{print $3}' | grep -E '^/mingw64/' | sort -u | \
           while read -r dll; do cp -L "$dll" "$ROOT/"; done
@@ -202,6 +208,9 @@ jobs:
           ROOT="dist/$NAME"
           mkdir -p "$ROOT"
           cp build/bin/umdplay "$ROOT/umdplay"
+          # Ship the official brand mark next to the binary (the runtime window
+          # icon is embedded in the executable).
+          cp assets/umdplay_logo.png "$ROOT/umdplay.png"
           # ffmpeg/ffprobe are runtime helpers for --export-clip; bundle them too
           # so the feature works without Homebrew installed.
           cp "$(brew --prefix)/bin/ffmpeg" "$(brew --prefix)/bin/ffprobe" "$ROOT/"

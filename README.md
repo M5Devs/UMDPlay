@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/umdplay_logo.png" alt="UMDPlay logo" width="150">
+</p>
+
 # UMDPlay &nbsp;·&nbsp; UMD Video Preservation Engine
 
 **Play and preserve Sony UMD Video discs straight from `.iso` or `.chd` — no

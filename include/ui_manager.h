@@ -25,6 +25,11 @@ public:
     bool init(const std::string& title = "UMDPlay - PSP UMD Video Player", int width = 960, int height = 544);
     void close();
 
+    // Set the taskbar/window icon from the official logo embedded in the binary
+    // (assets/umdplay_logo.png via include/umdplay_logo.h). No-op if the window
+    // is missing or the PNG fails to decode.
+    void set_window_icon();
+
     // Upload a decoded frame into the streaming video texture (no present).
     void update_video_texture(AVFrame* frame);
     // Upload a synthetic planar YUV420P image (Y then U then V), for demos.

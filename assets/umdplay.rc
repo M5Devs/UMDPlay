@@ -1,0 +1,5 @@
+// Windows executable icon for umdplay.exe (Explorer, taskbar, Alt-Tab).
+// The icon id is arbitrary; Explorer only needs the RT_GROUP_ICON/RT_ICON pair
+// the resource compiler derives from the multi-size .ico.
+#define IDI_UMDPLAY 101
+IDI_UMDPLAY ICON "umdplay.ico"
