@@ -47,9 +47,10 @@ Sony packaging.
 
 **UMDPlay** is the missing playback layer. It opens a UMD `.iso`/`.chd`
 directly, parses the disc's real filesystem, demuxes the MPEG-PS `.MPS`
-streams in memory through a custom FFmpeg `AVIOContext`, and decodes both the
-**H.264** video and the **ATRAC3+** audio — then presents them in a couch-ready
-Windows Media Center shell, complete with the disc's **own interactive menus**.
+streams in memory with a **native, libavformat-free `PsmfDemuxer`**, and decodes
+both the **H.264** video and the **ATRAC3+** audio — then presents them in a
+couch-ready Windows Media Center shell, complete with the disc's **own
+interactive menus**.
 
 The long-term goal is a stable, low-overhead playback core that drops straight
 into PSP emulators such as **PPSSPP** (GPLv2 was chosen for exactly this
@@ -77,7 +78,8 @@ license compatibility).
   **`CLPI0088`** clip info.
 
 **Decoding**
-- In-memory **MPEG-2 Program Stream** demuxing via a seekable `AVIOContext`.
+- In-memory **MPEG-2 Program Stream** demuxing via a native `PsmfDemuxer` over
+  `DiscReader` (no `libavformat`).
 - **H.264 AVC** video, with optional **480i `yadif` deinterlacing**.
 - **Sony PSMF ATRAC3+** audio reverse-engineered from **Private Stream 1
   (`0xBD`)** — class-byte-agnostic frame sync and a **measured** frame stride,
@@ -108,7 +110,7 @@ license compatibility).
 | Component | Technology | Notes |
 |---|---|---|
 | Language | C++17 | Modern standard, max compiler compatibility |
-| Decoder | FFmpeg (`libavcodec`/`libavformat`/`libswscale`/`libswresample`) | In-memory demux + decode; optional `libavfilter` for yadif |
+| Decoder | FFmpeg `libavcodec` / `libswscale` / `libswresample` | Native `PsmfDemuxer` feeds `libavcodec`; optional `libavfilter` for yadif (no `libavformat`) |
 | Output & rendering | SDL2 | Software/GPU video, audio, input |
 | 10-foot UI | Dear ImGui (SDL2 + SDLRenderer2) | Immediate-mode WMC shell |
 | Image decode | stb_image / stb_image_write | `PARAM.SFO` art (`ICON0`/`PIC1`) + PNG screenshots |
@@ -137,7 +139,7 @@ Tagged releases ship ready-to-run bundles on the
 ```bash
 sudo apt-get update
 sudo apt-get install -y cmake build-essential pkg-config \
-                        libavformat-dev libavcodec-dev libavutil-dev \
+                        libavcodec-dev libavutil-dev \
                         libswscale-dev libswresample-dev libsdl2-dev
 # Optional: 480i deinterlacing (yadif)
 sudo apt-get install -y libavfilter-dev
@@ -328,10 +330,10 @@ ring; `ESC`/`B` steps back (or leaves at the top level), `ENTER`/`A` activates.
 ## 🗂️ Project layout
 
 ```text
-include/ · src/     C++17 modules — iso_reader, decoder, disc_reader,
-                    param_sfo, playlist_parser, rco_parser, vsmx_vm,
+include/ · src/     C++17 modules — iso_reader, disc_reader, psmf_demuxer,
+                    decoder, param_sfo, playlist_parser, rco_parser, vsmx_vm,
                     rco_menu, wmc_ui, ui_sfx, clip_export, ui_manager
-tests/              ctest suites (9) + fixtures + lsan.supp
+tests/              ctest suites (10) + fixtures + lsan.supp
 docs/               ARCHITECTURE.md · TESTED_DISCS.md · CHD_GUIDE.md
 screenshots/        README showcase images (headless renders)
 third_party/        vendored stb_image
@@ -369,10 +371,11 @@ Full details in the [CHD Compression Guide](docs/CHD_GUIDE.md).
 ## 🗺️ Roadmap
 
 - [x] **Phase 1 — ISO & UDF Parser**: navigate `UMD_VIDEO/STREAM/`, resolve LBAs dynamically.
-- [x] **Phase 2 — Streaming & Decoding**: in-memory `AVIOContext`, H.264 AVC, PSMF ATRAC3+ reverse-engineering.
+- [x] **Phase 2 — Streaming & Decoding**: native in-memory `PsmfDemuxer`, H.264 AVC, PSMF ATRAC3+ reverse-engineering.
 - [x] **Phase 3 — Standalone Player + WMC UI**: synced A/V playback, WMC 10-foot shell, headless clip export.
 - [x] **Phase 4 — Interactive Menus & Chapters**: `PLAYLIST.UMD` / `CLPI0088`, real chapters, `.RCO` object tree + VSMX menu VM.
 - [x] **Phase 4.5 — Unified `DiscReader`**: ISO + CHD via libchdr.
+- [x] **Phase 6 (Step 1) — FFmpeg Independence**: native `PsmfDemuxer` replaces `libavformat` demuxing (ISO + CHD).
 - [ ] **Phase 5 — PPSSPP integration**: expose a clean C-style API for native upstream integration.
 
 ---

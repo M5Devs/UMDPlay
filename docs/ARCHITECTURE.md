@@ -125,7 +125,16 @@ Offset             Size    Field
 - **Audio Track:** ATRAC3plus packed inside **Private Stream 1 (`0x000001BD`)**
 
 ### In-Memory Streaming (Phase 2 Solution)
-To avoid extracting gigabytes of data to disk, `UMDPlay` feeds raw sector streams directly into FFmpeg via a custom `AVIOContext` with seekable callbacks:
+To avoid extracting gigabytes of data to disk, `UMDPlay` reads raw sector streams
+directly through a `DiscReader` and demuxes them in memory with a native
+`PsmfDemuxer` — **no `libavformat`/`AVFormatContext`/`AVIOContext`**. Only the
+elementary streams are handed to FFmpeg `libavcodec` for decoding.
+
+(The shared `libavformat.so` may still appear in `ldd` on Debian/Ubuntu because
+its `libavfilter.so` — used only for optional yadif — is built with a `NEEDED`
+entry for it. UMDPlay neither links nor calls it; a build without `libavfilter`
+has no `libavformat` in the process at all.)
+
 `Base_Byte_Offset = entry.lba * 2048`.
 
 The bytes themselves come from a `DiscReader` (`include/disc_reader.h`) — a thin
@@ -138,10 +147,9 @@ byte-range abstraction with two backends selected by file extension:
   bytes, so `ChdBackend` keeps a small direct-mapped cache of decompressed
   hunks and serves unaligned cross-hunk reads from it.
 
-`IsoReader`, `Decoder` (both the `AVIOContext` and the hand PSMF audio demuxer)
-and the clip exporter all read through this one interface, so `.iso` and `.chd`
-behave identically — verified by exporting byte-identical MP4 clips from an ISO
-and its CHD twin.
+`IsoReader`, `PsmfDemuxer`, `Decoder` and the clip exporter all read through this
+one interface, so `.iso` and `.chd` behave identically — verified by exporting
+byte-identical MP4 clips from an ISO and its CHD twin.
 
 ---
 
@@ -166,10 +174,11 @@ Every ATRAC3plus frame is prepended with an 8-byte proprietary Sony frame sync h
 Stripping this 8-byte prefix exposes the pure ATRAC3plus elementary frame payload.
 
 ### 3. Bitstream Decoding via FFmpeg
-The elementary ATRAC3plus stream can be fed into FFmpeg's `atrac3p` decoder by wrapping the frames inside a `WAVE_FORMAT_EXTENSIBLE` (Format Tag `0xFFFE`) container with the official ATRAC3plus GUID:
-```c
-{ 0xBF, 0xAA, 0x23, 0xE9, 0x58, 0xCB, 0x71, 0x44, 0xA1, 0x19, 0xFF, 0xFA, 0x01, 0xE4, 0xCE, 0x62 }
-```
+The elementary ATRAC3plus stream is fed into FFmpeg's `atrac3p` decoder by
+setting `AVCodecContext::block_align` to the measured stride and passing each
+8-byte-prefix-stripped frame as one packet. (Sony's `WAVE_FORMAT_EXTENSIBLE`
+GUID wrapper — `{ 0xBF, 0xAA, 0x23, 0xE9, 0x58, 0xCB, 0x71, 0x44, 0xA1, 0x19,
+0xFF, 0xFA, 0x01, 0xE4, 0xCE, 0x62 }` — is not needed with the raw-packet path.)
 - **Sample Rate:** 44,100 Hz
 - **Channels:** 2 (Stereo)
 - **Samples Per Block:** 2,048
@@ -177,14 +186,17 @@ The elementary ATRAC3plus stream can be fed into FFmpeg's `atrac3p` decoder by w
 ### 4. Frame Stride Is Measured, Not Assumed
 The **frame stride** (bytes per ATRAC3+ frame) depends on the encoded bitrate and
 is **measured from the stream** by histogramming the spacing between successive
-`0F D0 48 55` sync words, rather than hard-coded. On both reference discs it is
+`0F D0 48 <xx>` sync words, rather than hard-coded. On both reference discs it is
 **696 bytes**, but a disc with a different bitrate/frame size still demuxes
-correctly; 696 is only the fallback for a stream too short to probe.
+correctly; 696 is only the fallback for a stream too short to probe. The 4th
+sync byte is a size class (`0x55` = 696, `0xD5` = 1720) and a UMD-Music disc can
+switch class **mid-stream**, so the matcher must accept any class byte.
 
-The hand-written demuxer lives in `src/decoder.cpp` (the `psmf_*` helpers); it
-scans `0xBD` PES packets, strips the sub-header and the 8-byte frame prefix, and
-feeds the elementary ATRAC3+ stream to FFmpeg's `atrac3p` decoder. On seek it
-re-anchors on a real MPEG-PS pack boundary so audio and video stay in sync.
+The native demuxer lives in `src/psmf_demuxer.cpp`; it scans `0xBD` PES packets,
+strips the sub-header and the 8-byte frame prefix, and feeds the elementary
+ATRAC3+ frames to FFmpeg's `atrac3p` decoder. On seek it re-anchors on a real
+MPEG-PS pack boundary (`snap_to_pack`) and filters by PES PTS so audio and video
+stay in sync.
 
 ---
 

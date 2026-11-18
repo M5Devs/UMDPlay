@@ -52,7 +52,6 @@ include_directories(${PROJECT_SOURCE_DIR}/third_party)
 
 # --- FFmpeg + SDL2 (system) ---
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(AVFORMAT REQUIRED libavformat)
 pkg_check_modules(AVCODEC REQUIRED libavcodec)
 pkg_check_modules(AVUTIL REQUIRED libavutil)
 pkg_check_modules(SWSCALE REQUIRED libswscale)
@@ -72,7 +71,7 @@ if(APPLE)
 endif()
 
 include_directories(
-    ${AVFORMAT_INCLUDE_DIRS} ${AVCODEC_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS}
     ${SWSCALE_INCLUDE_DIRS} ${SWRESAMPLE_INCLUDE_DIRS} ${AVFILTER_INCLUDE_DIRS}
     ${SDL2_INCLUDE_DIRS}
 )
@@ -82,7 +81,7 @@ include_directories(
 # /opt/homebrew/opt/*/lib, so pass the directories through or linking fails with
 # "ld: library 'SDL2' not found". Must precede the targets that link them.
 link_directories(
-    ${AVFORMAT_LIBRARY_DIRS} ${AVCODEC_LIBRARY_DIRS} ${AVUTIL_LIBRARY_DIRS}
+    ${AVCODEC_LIBRARY_DIRS} ${AVUTIL_LIBRARY_DIRS}
     ${SWSCALE_LIBRARY_DIRS} ${SWRESAMPLE_LIBRARY_DIRS} ${AVFILTER_LIBRARY_DIRS}
     ${SDL2_LIBRARY_DIRS}
 )
@@ -182,6 +181,7 @@ add_library(umdplay_core STATIC
     src/disc_reader.cpp
     src/iso_reader.cpp
     src/param_sfo.cpp
+    src/psmf_demuxer.cpp
     src/decoder.cpp
     src/recent.cpp
     src/gesture.cpp
@@ -194,9 +194,14 @@ add_library(umdplay_core STATIC
 target_include_directories(umdplay_core PUBLIC
     ${chdr_SOURCE_DIR}/include
 )
+# Playback demuxing is native (PsmfDemuxer over DiscReader), so libavformat is
+# no longer linked or used; only libavcodec (H.264 + atrac3p decode), libavutil,
+# libswscale/libswresample and the optional libavfilter (yadif) remain. (Debian's
+# libavfilter.so itself carries a NEEDED entry for libavformat.so, so it can
+# still show in ldd — but nothing in UMDPlay calls it.)
 target_link_libraries(umdplay_core PUBLIC
     chdr-static
-    ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES}
+    ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES}
     ${SWSCALE_LIBRARIES} ${SWRESAMPLE_LIBRARIES} ${AVFILTER_LIBRARIES}
 )
 if(AVFILTER_FOUND)
@@ -288,6 +293,17 @@ set_tests_properties(test_playlist PROPERTIES
 # The audio decoder test decodes a real stream when an ISO is reachable
 # (UMD_ISO env var or ./test_umd.iso) and degrades to state checks otherwise.
 set_tests_properties(test_audio_decoder PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    ENVIRONMENT "UMD_ISO=${PROJECT_SOURCE_DIR}/test_umd.iso")
+
+# Native PsmfDemuxer: synthetic MPEG-PS pack/PES parsing (0xE0 video + 0xBD
+# ATRAC3+), 33-bit PTS decoding, variable 0F D0 48 <xx> stride and seek. No
+# disc needed; a real ISO additionally exercises a live demux when present.
+add_executable(test_psmf_demuxer tests/test_psmf_demuxer.cpp)
+target_link_libraries(test_psmf_demuxer PRIVATE umdplay_core)
+target_compile_options(test_psmf_demuxer PRIVATE ${UMDPLAY_WARN_FLAGS})
+add_test(NAME test_psmf_demuxer COMMAND test_psmf_demuxer)
+set_tests_properties(test_psmf_demuxer PROPERTIES
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     ENVIRONMENT "UMD_ISO=${PROJECT_SOURCE_DIR}/test_umd.iso")
 

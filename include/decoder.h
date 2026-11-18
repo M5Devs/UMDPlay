@@ -1,14 +1,12 @@
 #pragma once
 
 #include "iso_reader.h"
+#include "psmf_demuxer.h"
 #include <string>
-#include <fstream>
 #include <cstdint>
-#include <iostream>
 #include <vector>
 
 extern "C" {
-#include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #if defined(UMDPLAY_HAVE_AVFILTER)
 #include <libavfilter/avfilter.h>
@@ -23,7 +21,7 @@ extern "C" {
 
 // Sony PSMF ATRAC3+ framing default: an 8-byte sync header (0F D0 48 55 …)
 // followed by a payload; the 696-byte stride is the common stereo case but the
-// real value is detected per-stream (see Decoder::psmf_detect_stride).
+// real value is detected per-stream (see PsmfDemuxer::detect_stride).
 static constexpr size_t SONY_FRAME_STRIDE_DEFAULT = 696;
 
 struct StreamInfo {
@@ -40,6 +38,10 @@ enum class FrameType {
     Eof
 };
 
+// Decodes an UMD `.MPS` stream by demuxing it with the native PsmfDemuxer
+// (no libavformat) and feeding the resulting elementary packets to libavcodec
+// (H.264 video, Sony ATRAC3+ audio). Deinterlacing (yadif) and PCM resampling
+// (swresample) are unchanged.
 class Decoder {
 public:
     Decoder();
@@ -57,7 +59,7 @@ public:
     bool seek_relative(double seconds);
 
     // Seek to an absolute position in seconds, clamping to [0, duration].
-    // Flushes codec buffers and re-anchors the PSMF audio demuxer so no stale
+    // Flushes codec buffers and re-anchors the PSMF demuxer so no stale
     // audio/video survives the jump.
     bool seek_absolute(double seconds);
 
@@ -66,12 +68,12 @@ public:
     double current_time() const { return m_clock; }
 
     // Pure helper: derive the ATRAC3+ frame stride from a raw byte window by
-    // histogramming gaps between 0F D0 48 55 sync words. Returns `fallback`
+    // histogramming gaps between 0F D0 48 <xx> sync words. Returns `fallback`
     // when fewer than two syncs are visible. Exposed for unit testing.
     static size_t detect_stride_from(const uint8_t* buf, size_t n, size_t fallback);
 
     bool has_video() const { return m_video.stream_index != -1; }
-    bool has_audio() const { return m_audio.stream_index != -1 || m_psmf_audio; }
+    bool has_audio() const { return m_audio.stream_index != -1; }
     double get_fps() const { return m_fps; }
 
     // Enable/disable deinterlacing of decoded video frames. 480i NTSC UMD Video
@@ -100,67 +102,62 @@ public:
     }
 
     // Human-readable video codec name ("h264", ...), or "" when unknown.
-    // Uses the codec id (stable API) rather than AVCodecContext::codec, which
-    // newer FFmpeg releases deprecate.
     const char* video_codec_name() const {
         if (!m_video.codec_ctx) return "";
         const char* n = avcodec_get_name(m_video.codec_ctx->codec_id);
         return n ? n : "";
     }
 
-    // Detected ATRAC3+ frame stride in bytes (SONY_FRAME_STRIDE_DEFAULT when
-    // the stream uses the FFmpeg demuxer rather than the hand PSMF path).
-    size_t audio_stride() const { return m_psmf_stride; }
-    // True when audio is being demuxed by the hand PSMF (ATRAC3+) fallback.
-    bool using_psmf_audio() const { return m_psmf_audio; }
+    // Detected ATRAC3+ frame stride in bytes.
+    size_t audio_stride() const { return m_demux.info().audio_stride; }
+    // True when audio is present and demuxed by the native PSMF path.
+    bool using_psmf_audio() const { return m_audio.stream_index != -1; }
     int  audio_sample_rate() const {
         return m_audio.codec_ctx ? m_audio.codec_ctx->sample_rate : 0;
     }
 
     // Total stream duration in seconds (0 if unknown).
-    double get_duration() const;
+    double get_duration() const { return m_duration; }
 
 private:
-    struct StreamIoState {
-        // Non-owning: the disc image lives in Decoder::m_reader so the AVIOContext
-        // and the hand PSMF demuxer share one ISO/CHD backend.
-        const umdplay::DiscReader* reader = nullptr;
-        uint64_t      base_offset = 0;   // entry.lba * 2048
-        uint64_t      file_size   = 0;   // entry.size_bytes
-        uint64_t      cursor      = 0;   // offset relative to base
-    };
+    // Presentation time of a decoded frame in seconds (-1 if unknown). The
+    // video decoder is primed with a 1/90000 packet time base, so frame PTS is
+    // in the same 90 kHz clock as the PES timestamps.
+    static double frame_seconds(const AVFrame* f);
 
-    static int     read_packet(void* opaque, uint8_t* buf, int buf_size);
-    static int64_t seek_packet(void* opaque, int64_t offset, int whence);
+    // Next demuxer packet, honouring the one-packet pushback slot.
+    bool pull(umdplay::PsmfPacket& out);
+    void push_back(umdplay::PsmfPacket&& pkt);
 
-    void process_audio_packet(AVPacket* pkt, AVFrame* audio_frame, std::vector<uint8_t>* out_pcm = nullptr);
+    // Send a video access unit to the H.264 decoder and try to receive a frame.
+    // Returns true when a frame was produced into `out`.
+    bool send_video(const umdplay::PsmfPacket& pkt, AVFrame* out);
 
-    // Sony PSMF ATRAC3+ fallback. FFmpeg's MPEG-PS demuxer does not expose the
-    // private stream 1 (0xBD) audio track, so when no audio stream is found the
-    // ATRAC3+ frames are demuxed by hand: 0xBD PES payloads are concatenated
-    // (frames span PES boundaries), split on the fixed 696-byte stride (8-byte
-    // Sony sync header + 688-byte frame) and the sync header is stripped.
-    bool init_psmf_audio();
-    bool psmf_read_more();
-    void process_psmf_audio(AVFrame* audio_frame, std::vector<uint8_t>& out_pcm, bool flush);
-    bool resample_to_s16(AVFrame* audio_frame, std::vector<uint8_t>& out_pcm);
-    void reset_psmf_audio(uint64_t scan_offset);
-    // Trim/pad the first PCM chunk so audio starts on the same timeline as the
+    // Read demuxer packets until the next video frame is decoded (buffering any
+    // audio PCM encountered on the way). Returns false at end of stream.
+    bool decode_next_video(AVFrame* out);
+
+    // Decode demuxer packets into m_pcm_ready until the stream reaches
+    // `target_samples` (or a video packet turns up, which is pushed back).
+    void pump_audio(int64_t target_samples);
+
+    void flush_video();
+    void flush_audio();
+
+    // Decode one ATRAC3+ access unit to S16 stereo PCM, appending to
+    // m_pcm_ready and recording the first post-anchor PES PTS.
+    void decode_audio_packet(const umdplay::PsmfPacket& pkt);
+
+    // Resample a decoded ATRAC3+ frame (FLTP) to interleaved S16 stereo and
+    // append it to m_pcm_ready.
+    void resample_to_s16(AVFrame* audio_frame);
+    // Trim/pad the buffered PCM so audio starts on the same timeline as the
     // video's first post-seek frame (PES PTS vs frame PTS). One-shot per anchor.
-    void apply_psmf_align(std::vector<uint8_t>& pcm);
-    // Find the MPEG-PS pack/system-header offset nearest to a byte target so a
-    // seek can re-anchor the hand demuxer on a real packet boundary.
-    uint64_t psmf_find_scan_offset(uint64_t target);
+    void apply_align();
 
-    // Detect the ATRAC3+ frame stride (8-byte sync + payload) by measuring the
-    // distance between consecutive 0F D0 48 55 sync words in the stream. UMD
-    // Video discs are not all 696 bytes (that is the 176.4 KB/s stereo case);
-    // reading the real spacing keeps every bitrate working.
-    size_t psmf_detect_stride();
-
-    // Decode the next video frame from the FFmpeg demuxer, discarding packets
-    // that belong to no tracked stream. Used by the PSMF interleave path.
-    FrameType decode_video_frame(AVFrame* out);
+    // Move up to `max_bytes` of buffered PCM into `pcm` (honouring any pending
+    // post-seek skip). Returns true when any bytes were produced.
+    bool drain_pcm(std::vector<uint8_t>& pcm, size_t max_bytes);
 
     // Deinterlacing: 480i UMD Video frames carry AV_FRAME_FLAG_INTERLACED, so
     // they are run through a yadif filter graph to remove combing. The graph is
@@ -169,40 +166,39 @@ private:
     bool maybe_deinterlace(AVFrame* f);
     void free_deinterlace_graph();
 
-    StreamIoState    m_io;
-    uint8_t*         m_avio_buffer = nullptr;
-    AVIOContext*     m_avio_ctx    = nullptr;
-    AVFormatContext* m_fmt_ctx     = nullptr;
+    umdplay::DiscReader  m_reader;             // ISO or CHD disc image (read_at)
+    umdplay::PsmfDemuxer m_demux;              // native MPEG-PS demuxer
 
     StreamInfo       m_video;
     StreamInfo       m_audio;
-    std::vector<uint8_t> m_audio_buffer;
+    AVPacket*        m_pkt = nullptr;          // reusable packet handed to codecs
 
-    // PSMF ATRAC3+ fallback state
-    bool                 m_psmf_audio   = false;
-    bool                 m_psmf_eof     = false;
-    uint64_t             m_psmf_cursor  = 0;   // next MPEG-PS packet offset (relative to base)
-    std::vector<uint8_t> m_psmf_pes;           // buffered concatenated 0xBD payloads
-    size_t               m_psmf_pos     = 0;   // parse cursor inside m_psmf_pes
-    size_t               m_psmf_stride  = SONY_FRAME_STRIDE_DEFAULT; // detected stride
-    int64_t              m_psmf_samples = 0;   // PCM samples emitted so far
-    // PES PTS (90 kHz) of the first audio frame after the current anchor; used
-    // to trim audio so it starts on the same timeline as the first video frame.
-    int64_t              m_psmf_next_pts = AV_NOPTS_VALUE;
-    int64_t              m_psmf_pts_skip_samples = 0; // PCM frames still to drop
-    bool                 m_psmf_align_done = false;   // skip/pad computed for this anchor
-    bool                 m_psmf_pts_started = true;   // accepting audio PES (>= anchor)
-    int64_t              m_vcount       = 0;   // video frames emitted (A/V pacing)
-    std::vector<uint8_t> m_psmf_scan;          // reusable read buffer
-    AVPacket*            m_psmf_pkt     = nullptr;
-    AVFrame*             m_psmf_video   = nullptr; // stashed frame for A/V interleave
-    bool                 m_psmf_video_pending = false;
-    std::string          m_iso_path;
-    umdplay::DiscReader  m_reader;             // ISO or CHD disc image (read_at)
+    // Decoded audio PCM awaiting delivery to the caller, drained from the front.
+    std::vector<uint8_t> m_pcm_ready;
+    size_t               m_pcm_pos = 0;
+
+    // One-packet pushback so pumping audio never loses the next video packet.
+    umdplay::PsmfPacket  m_pushback;
+    bool                 m_have_pushback = false;
+
+    // Post-seek A/V alignment: PES PTS (90 kHz) of the first audio frame after
+    // the anchor and the residual sample skip left by a fully-early chunk.
+    int64_t              m_psmf_next_pts = umdplay::PSMF_NOPTS;
+    int64_t              m_psmf_skip_samples = 0;
+    bool                 m_align_done = false;
+    int64_t              m_audio_samples = 0;  // PCM samples decoded since anchor
+    int64_t              m_vcount = 0;         // video frames emitted (A/V pacing)
+
+    AVFrame*         m_stashed_video = nullptr; // pending frame for A/V interleave
+    bool             m_video_pending = false;
+
+    bool             m_video_eof = false;      // demuxer exhausted
+    bool             m_audio_eof = false;
+    bool             m_video_flushed = false;  // decoder drain packet sent
+    bool             m_audio_flushed = false;
 
     SwrContext*      m_swr_ctx     = nullptr;
     AVFrame*         m_temp_audio_frame = nullptr;
-    AVPacket*        m_demux_pkt   = nullptr;
     double           m_fps         = 29.97;
     double           m_duration    = 0.0;   // seconds (0 = unknown)
     double           m_clock       = 0.0;   // last decoded video PTS (seconds)

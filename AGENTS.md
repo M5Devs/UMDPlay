@@ -15,8 +15,9 @@ compression).
 
 UMDPlay is a C++17 playback/preservation engine for Sony **UMD Video** discs.
 It opens a UMD `.iso`/`.chd`, walks the UDF/ISO 9660 filesystem, demuxes the
-MPEG-PS `.MPS` streams in memory through a custom FFmpeg `AVIOContext`, and
-decodes **H.264** video + **Sony PSMF ATRAC3+** audio. It ships a Windows Media
+MPEG-PS `.MPS` streams in memory with a native `PsmfDemuxer` reading straight
+from `DiscReader`, and decodes **H.264** video + **Sony PSMF ATRAC3+** audio
+through FFmpeg `libavcodec` (no `libavformat`). It ships a Windows Media
 Center 10-foot UI, an interactive `.RCO`/VSMX disc-menu renderer, and headless
 CLI tooling (`--probe`, `--export-clip`, `--demo`).
 
@@ -30,7 +31,7 @@ adding a per-disc constant, stop and make it dynamic.
 
 ```text
 CMakeLists.txt          Build: umdplay_core, umdplay_ui_sfx, imgui_backends,
-                        stb_image + umdplay_logo libs + umdplay exe + 9 test exes
+                        stb_image + umdplay_logo libs + umdplay exe + 10 test exes
 cmake/EmbedAsset.cmake  Turns a binary file into a C++ byte array (build step)
 include/                Public headers (one per module)
 src/                    Module implementations + main.cpp (CLI/app)
@@ -51,7 +52,8 @@ third_party/            Vendored stb_image (single header)
 |---|---|---|
 | **iso_reader** | `include/iso_reader.h`, `src/iso_reader.cpp` | Walks the ISO 9660/UDF tree from the PVD to find `UMD_VIDEO/`/`UMD_MUSIC/` and `STREAM/`; enumerates `.MPS` streams, `RESOURCE/`, `CLIPINF/`, metadata. No fixed LBAs. |
 | **disc_reader** | `include/disc_reader.h`, `src/disc_reader.cpp` | Byte-range backend chosen by extension: `.iso` (positional read) or `.chd` (libchdr + decompressed-hunk cache). Everything reads through this. |
-| **decoder** | `include/decoder.h`, `src/decoder.cpp` | `AVIOContext` over `DiscReader`; H.264 decode (+ optional yadif), hand PSMF `0xBD` ATRAC3+ demuxer, seek/resync, A/V clock. |
+| **psmf_demuxer** | `include/psmf_demuxer.h`, `src/psmf_demuxer.cpp` | Native, libavformat-free MPEG-2 Program Stream (`.MPS`) demuxer over `DiscReader`: parses pack/system headers + PES in one pass, emits H.264 Annex-B access units (`0xE0`) with 90 kHz PTS/DTS + keyframe flags and Sony ATRAC3+ frames (`0xBD`) with dynamic `0F D0 48 <xx>` sync + measured stride. Estimates duration, seeks by byte offset + PES-PTS filter. |
+| **decoder** | `include/decoder.h`, `src/decoder.cpp` | Drives `PsmfDemuxer` → `AVCodecContext` for H.264 decode (+ optional yadif) and `atrac3p`; seek/resync, A/V clock + PTS alignment. Uses `libavcodec`/`libavutil`/`libswscale`/`libswresample` (+ optional `libavfilter`), **not** `libavformat`. |
 | **param_sfo** | `include/param_sfo.h`, `src/param_sfo.cpp` | Bounds-checked `PARAM.SFO` (`\0PSF`) parser — `TITLE`, `DISC_ID`, `CATEGORY`, `APP_VER`. |
 | **playlist_parser** | `include/playlist_parser.h`, `src/playlist_parser.cpp` | Big-endian `PLAYLIST.UMD` (`UMDV0088`/`UMDA0088`) — tracks, clips, 90 kHz chapter markers. |
 | **rco_parser** | `include/rco_parser.h`, `src/rco_parser.cpp` | Little-endian `.RCO` (`\0PRF`) container — TOC, embedded PNGs, object tree, VSMX blob + events. |
@@ -110,12 +112,14 @@ SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
     ./build/bin/umdplay --demo --strip settings --screenshot hub.png   # no disc needed
 ```
 
-### Test suites (9)
+### Test suites (10)
 
-`test_audio_decoder` (PSMF stride detection + optional real-ISO decode),
-`test_param_sfo`, `test_recent`, `test_playback`, `test_gesture`,
-`test_playlist` (optional real disc via `UMD_ISO=`), `test_chd` (committed
-`fixtures/pattern.chd`), `test_iso_reader` (synthetic ISO, no disc), `test_ui_sfx`.
+`test_psmf_demuxer` (synthetic MPEG-PS `0xE0`/`0xBD` + PTS + variable stride +
+seek; optional real-ISO demux), `test_audio_decoder` (PSMF stride detection +
+optional real-ISO decode), `test_param_sfo`, `test_recent`, `test_playback`,
+`test_gesture`, `test_playlist` (optional real disc via `UMD_ISO=`),
+`test_chd` (committed `fixtures/pattern.chd`), `test_iso_reader` (synthetic ISO,
+no disc), `test_ui_sfx`.
 
 **Always use a local `CHECK(cond)` macro that evaluates unconditionally** — do
 **not** use `assert()`, which is compiled out under `NDEBUG` (Release/CI) and
@@ -134,12 +138,17 @@ UMDPlay.
 
 ## Critical technical gotchas
 
-1. **PSMF demuxing is hand-written.** Sony omits standard PSMF headers on UMD
-   Video, so FFmpeg's demuxer can't be used for audio. `src/decoder.cpp` scans
-   MPEG-PS packs, finds **Private Stream 1 (`0x000001BD`)**, strips the 4-byte
-   PES sub-header (bytes 2–3 = first-access-unit pointer) and the 8-byte Sony
-   frame prefix, and feeds the elementary ATRAC3+ to FFmpeg's `atrac3p` decoder
-   wrapped in a `WAVE_FORMAT_EXTENSIBLE` header with the ATRAC3+ GUID.
+1. **PSMF demuxing is native (`PsmfDemuxer`), not FFmpeg.** Sony omits standard
+   PSMF headers on UMD Video, so FFmpeg's MPEG-PS demuxer can't be used for the
+   audio (and `libavformat` is not linked at all). `src/psmf_demuxer.cpp` reads
+   the `.MPS` byte range straight from `DiscReader`, walks the MPEG-PS pack
+   (`00 00 01 BA`) and system (`0xBB`) headers, finds **Private Stream 1
+   (`0x000001BD`)**, strips the 4-byte Sony substream header, and splits the
+   concatenated payloads into ATRAC3+ frames by the `0F D0 48 <xx>` sync word —
+   each frame fed to `atrac3p` as the **8-byte-prefix-stripped** body. Video
+   (`0xE0`) is emitted as Annex-B access units with their 33-bit PES PTS/DTS.
+   The decoder is primed with Annex-B SPS/PPS extradata (NOT an avcC record, or
+   `libavcodec` would expect length-prefixed NAL units).
 
 2. **ATRAC3+ frame sync is `0F D0 48 <xx>` — never `memcmp` 8 bytes.** The 4th
    byte is a **frame-size class**: `0x55` for the common 696-byte frame, `0xD5`
@@ -147,18 +156,22 @@ UMDPlay.
    four zero bytes (`is_sony_frame_sync`). UMD-Music discs switch `0x55`→`0xD5`
    **mid-stream**; hardcoding `0x55`/696 yields **0 audio bytes** on them.
 
-3. **Frame stride is measured, not assumed.** `detect_stride_from()` histograms
-   `0F D0 48 <xx>` sync-word gaps over a 512 KB window (dominant small gap wins).
-   Frame length prefers the distance to the next sync header (clamped 64..8192),
-   else the detected stride. `696` is only the fallback for a too-short stream.
+3. **Frame stride is measured, not assumed.** `PsmfDemuxer::detect_stride()`
+   histograms `0F D0 48 <xx>` sync-word gaps over a byte window (dominant small
+   gap wins). Frame length prefers the distance to the next sync header (clamped
+   64..8192), else the detected stride. `696` is only the fallback for a
+   too-short stream. The window is built from the **concatenated `0xBD`
+   payloads**, not raw stream bytes, so one-frame-per-PES streams still show a
+   contiguous stride.
 
-4. **Seek correctness.** `Decoder::seek_absolute()` flushes codec buffers, sets
-   a video-resync flag, `av_seek_frame(..., AVSEEK_FLAG_BACKWARD)`, and for PSMF
-   re-anchors the hand reader on a real pack boundary
-   (`psmf_find_scan_offset`). The resync flag must be cleared when the keyframe
-   is **sent**, not **received** — otherwise every P-frame after the keyframe is
-   also dropped and playback resumes at the *next* keyframe 1–2 s late. Audio
-   PES `< m_pts_anchor` is skipped, then a one-shot trim/pad removes residual.
+4. **Seek correctness.** `Decoder::seek_absolute()` flushes codec buffers and
+   arms a video-resync flag, then `PsmfDemuxer::seek()` repositions on a real
+   MPEG-PS pack boundary (`snap_to_pack`) and arms a PES-PTS filter so packets
+   before the target are dropped. The resync flag must be cleared when the
+   keyframe is **sent**, not **received** — otherwise every P-frame after the
+   keyframe is also dropped and playback resumes at the *next* keyframe 1–2 s
+   late. Audio PES `< m_pts_anchor` is skipped, then a one-shot trim/pad removes
+   residual.
 
 5. **VSMX `END_STMT` must truncate, not clear.** Each `Frame` records a
    `stack_base` (stack depth at entry); `END_STMT` truncates to it and `RETURN`
