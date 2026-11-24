@@ -32,6 +32,10 @@ option(UMDPLAY_NATIVE_ATRAC3P "Use the native ATRAC3+ decoder (no libswresample)
 # when FFmpeg is installed).
 option(UMDPLAY_NATIVE_VIDEO "Use the native H.264 decoder (no libavcodec)" ON)
 
+# Build the AveraUI Qt 6 Quick front end (libs/avera-ui + apps/avera-player).
+# Off by default so the core, tests and CLI never need Qt installed.
+option(UMDPLAY_AVERA_UI "Build the AveraUI Qt 6 Quick front end" OFF)
+
 # Project warning bar, selected per compiler so the build is clean under GCC,
 # Clang, MinGW and MSVC alike. Third-party code is silenced separately so
 # vendored sources never fail the project's -Werror.
@@ -401,6 +405,11 @@ add_test(NAME test_video_decoder COMMAND test_video_decoder)
 set_tests_properties(test_video_decoder PROPERTIES
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     ENVIRONMENT "UMD_H264_FIXTURE=${PROJECT_SOURCE_DIR}/tests/fixtures/h264/testsrc2_720x480.h264")
+
+if(UMDPLAY_AVERA_UI)
+    add_subdirectory(libs/avera-ui)
+    add_subdirectory(apps/avera-player)
+endif()
 
 install(TARGETS umdplay DESTINATION bin)
 

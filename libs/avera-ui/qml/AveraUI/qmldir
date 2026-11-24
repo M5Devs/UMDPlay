@@ -1,0 +1,5 @@
+singleton Theme 1.0 Theme.qml
+Card 1.0 Card.qml
+HubView 1.0 HubView.qml
+PlayerView 1.0 PlayerView.qml
+TransportOsd 1.0 TransportOsd.qml

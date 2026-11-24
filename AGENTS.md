@@ -41,7 +41,9 @@ docs/                   ARCHITECTURE.md, TESTED_DISCS.md, CHD_GUIDE.md
 assets/                 Brand art: umdplay_logo.png (official, embedded in the
                         binary), umdplay_flat.png, umdplay.ico + umdplay.rc (Windows)
 screenshots/            README showcase images (tracked; everything else *.png ignored)
-third_party/            Vendored stb_image (single header) and h264dec (H.264)
+third_party/            Vendored stb_image (single header)
+libs/avera-ui/          AveraUI: reusable Qt 6 Quick 10-foot shell (QML + C++)
+apps/avera-player/      Qt front end: binds Decoder to AveraUI and h264dec (H.264)
 .github/workflows/      ci.yml (Linux GCC + macOS arm64/x86_64: -Werror, ctest, Xvfb)
 ```
 
@@ -69,6 +71,8 @@ third_party/            Vendored stb_image (single header) and h264dec (H.264)
 | **clip_export** | `include/clip_export.h`, `src/clip_export.cpp` | Headless decode → MP4 (shells out to the `ffmpeg` CLI for H.264/AAC muxing). |
 | **gesture** / **aspect** / **recent** | matching headers | Touch/mouse gesture recognition, zoom/aspect modes, recent-disc persistence. |
 | **atrac3p_decoder** | `include/atrac3p_decoder.h`, `src/atrac3p_decoder.cpp`, `src/atrac3p/` | Native, FFmpeg-free ATRAC3+ decoder: bitstream parser, IMDCT + windowing, gain compensation, GHA tone synthesis, power compensation and the IPQF synthesis bank. Ported from FFmpeg's atrac3plus (LGPL-2.1+, see `NOTICE`). `include/audio_decoder_backend.h` is the `AudioDecoderBackend` seam `Decoder` drives; `make_native_atrac3p_backend()` is the default implementation. |
+| **avera_ui** | `libs/avera-ui/include/avera_ui/*`, `src/*`, `qml/AveraUI/*` | Reusable Qt 6 Quick shell. `AveraHub` (2-D card carousel model), `AveraPlayerController` (transport state + OSD timers over a host `AveraPlayerBackend`), `AveraVideoItem` (`VideoSurface`: YUV→RGB + `QSGSimpleTextureNode`), `AveraAudioOutput` (S16 stereo ring → `QAudioSink`), `AveraSfx` (procedural chimes). QML ships in the library's own resource at `:/avera/qml/AveraUI`. |
+| **avera-player** | `apps/avera-player/main.cpp`, `Main.qml` | The Qt front end: probes the disc, fills a hub, pumps the decoder at ~60 Hz and pushes frames/PCM into the AveraUI items. |
 | **logo (embedded)** | `include/umdplay_logo.h`, generated `umdplay_logo_data.cpp` | `assets/umdplay_logo.png` baked into the binary by `cmake/EmbedAsset.cmake`; drawn as the WMC hub header mark and set as the SDL window icon. |
 
 `main.cpp` wires them together: parse args → open disc → build hub state →
@@ -106,6 +110,32 @@ LSAN_OPTIONS=suppressions=tests/lsan.supp \
 are first-class CMake options (`CMakeLists.txt`). CI also passes `-DCMAKE_CXX_FLAGS=-Werror`; both approaches
 work. Vendored `libchdr`/`zstd`/`miniz` are compiled with `-w` and
 `-fno-sanitize=…` so their warnings/UB never fail a project run.
+
+### AveraUI (Qt 6 Quick front end)
+
+Off by default — the core, CLI and tests never need Qt.
+
+```bash
+cmake -B build-qt -DCMAKE_BUILD_TYPE=Release -DUMDPLAY_AVERA_UI=ON
+cmake --build build-qt -j"$(nproc)"
+./build-qt/bin/avera-player disc.iso            # hub; Enter plays the feature
+./build-qt/bin/avera-player disc.iso --play     # straight to the player
+./build-qt/bin/avera-player disc.iso --play --screenshot shot.png --shot-delay 4000
+```
+
+To capture a demo video (no GPU needed — Xvfb + llvmpipe work):
+
+```bash
+Xvfb :99 -screen 0 1280x720x24 &
+DISPLAY=:99 QT_QPA_PLATFORM=xcb ./build-qt/bin/avera-player disc.iso --play-after 3500 &
+DISPLAY=:99 ffmpeg -f x11grab -framerate 30 -video_size 1280x720 -i :99 -t 18 \
+    -c:v libx264 -pix_fmt yuv420p out.mp4
+```
+
+`QQuickWindow::grabWindow()` is **not** usable for frame-by-frame capture while
+video is playing: each grab paints a fresh node tree, and a node created inside
+the grab cannot own a texture across grabs (black frames, then a crash if you
+force it). Use X11 capture, or `--screenshot` for single stills.
 
 ### Headless UI / screenshots
 

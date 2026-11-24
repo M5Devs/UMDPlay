@@ -32,9 +32,15 @@ firmware, no emulator, no extraction.**
 | ![RCO main menu](screenshots/rco_menu_main.png) | ![RCO chapter menu](screenshots/rco_menu_chapters.png) |
 | The disc's own `main_menu` page, driven by its VSMX script | Its `chapter1_menu` page — buttons fire the disc's `onPush` handlers |
 
-> All four shots are rendered headlessly (`SDL_VIDEODRIVER=dummy`) from a real
-> Region-2 UMD-Video disc (*Miku no Hi 39's Giving Day*). No copyrighted media
-> is committed — the PNGs are UI chrome only.
+| **Avera UI** hub (Qt 6 Quick) | **Avera UI** player — real disc |
+|:---:|:---:|
+| ![Avera hub](screenshots/avera-hub.png) | ![Avera player](screenshots/avera-player.png) |
+| The reusable `libs/avera-ui` shell: disc, stream and action rows | 480i decoded by the native core, letterboxed at 4:3 by the QML surface |
+
+> The first four shots are rendered headlessly (`SDL_VIDEODRIVER=dummy`) from a
+> real Region-2 UMD-Video disc (*Miku no Hi 39's Giving Day*); the Avera shots
+> come from *Family Guy: Blue Harvest* (Region 1) under Xvfb. No copyrighted
+> media is committed — the PNGs are UI chrome only.
 
 ---
 
