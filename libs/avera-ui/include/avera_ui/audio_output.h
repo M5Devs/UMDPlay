@@ -35,6 +35,8 @@ public:
     void pushPcm(const int16_t* interleaved, int frames);
     /// Queued frames not yet played, for A/V pacing.
     int queuedFrames() const;
+    /// Frames the device has consumed since start(): the audio clock.
+    long long playedFrames() const;
 
     int  volume() const { return m_volume; }
     void setVolume(int percent);

@@ -222,6 +222,7 @@ add_library(umdplay_core STATIC
     src/decoder.cpp
     src/h264_video_decoder.cpp
     src/deinterlace.cpp
+    src/av_sync.cpp
     src/yuv_convert.cpp
     src/atrac3p_decoder.cpp
     src/atrac3p/atrac3p_parse.cpp

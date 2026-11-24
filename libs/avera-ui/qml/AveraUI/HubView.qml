@@ -169,6 +169,18 @@ Item {
         }
     }
 
+    // Settings category: the picture-repair policy is the one setting the
+    // shell owns today, and it applies to playback started from here too.
+    SettingsPanel {
+        player: root.player
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 112
+        anchors.rightMargin: Theme.margin
+        visible: root.hub ? root.hub.currentCategory === 4 : false
+        onChime: function (cue) { root.chime(cue) }
+    }
+
     // --- single WMC bottom row --------------------------------------------
     Item {
         id: bottomRow

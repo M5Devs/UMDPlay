@@ -5,6 +5,7 @@
 // profile, CABAC, 11 frames) so CI needs no disc and no copyrighted media.
 //
 // CHECK always evaluates (assert() is compiled out under NDEBUG/Release).
+#include "av_sync.h"
 #include "deinterlace.h"
 #include "video_decoder_backend.h"
 #include "video_frame.h"
@@ -302,13 +303,107 @@ void test_deinterlace() {
     CHECK(c.plane(1)[0] > 60);
     CHECK(c.plane(1)[0] < 200);
 
+    // --- Smart: motion-adaptive ------------------------------------------
+    // A progressive frame with a hard horizontal edge (a cartoon line) must
+    // come out bit-identical: that is the anti-ghosting guarantee.
+    umdplay::VideoFrame sharp;
+    sharp.allocate(64, 32);
+    for (int y = 0; y < sharp.height; ++y)
+        std::memset(sharp.plane(0) + static_cast<size_t>(y) * sharp.stride[0],
+                    y < sharp.height / 2 ? 30 : 220, sharp.width);
+    fill_plane(sharp, 1, 128);
+    fill_plane(sharp, 2, 128);
+
+    umdplay::VideoFrame blended = sharp;
+    umdplay::deinterlace_yuv420p(sharp, umdplay::DeinterlaceMode::Smart);
+    umdplay::deinterlace_yuv420p(blended, umdplay::DeinterlaceMode::Blend);
+    bool smart_identical = true;
+    for (int y = 0; y < sharp.height && smart_identical; ++y) {
+        const uint8_t* a = sharp.plane(0) + static_cast<size_t>(y) * sharp.stride[0];
+        for (int x = 0; x < sharp.width; ++x) {
+            const uint8_t want = (y < sharp.height / 2) ? 30 : 220;
+            if (a[x] != want) { smart_identical = false; break; }
+        }
+    }
+    CHECK(smart_identical);
+    CHECK(blended.plane(0)[static_cast<size_t>(sharp.height / 2) * blended.stride[0]] != 220);
+
+    // The same Smart mode still repairs a woven frame (a moving edge does comb).
+    umdplay::VideoFrame woven;
+    woven.allocate(64, 48);
+    for (int y = 0; y < woven.height; ++y)
+        std::memset(woven.plane(0) + static_cast<size_t>(y) * woven.stride[0],
+                    (y & 1) ? 200 : 40, woven.width);
+    fill_plane(woven, 1, 128);
+    fill_plane(woven, 2, 128);
+    const long woven_before = adjacent_delta(woven);
+    umdplay::deinterlace_yuv420p(woven, umdplay::DeinterlaceMode::Smart);
+    const long woven_after = adjacent_delta(woven);
+    std::printf("[*] smart deinterlace: comb delta %ld -> %ld\n", woven_before, woven_after);
+    CHECK(woven_after * 4 < woven_before);
+
+    // Off leaves the woven frame exactly as coded.
+    umdplay::VideoFrame raw;
+    raw.allocate(64, 48);
+    for (int y = 0; y < raw.height; ++y)
+        std::memset(raw.plane(0) + static_cast<size_t>(y) * raw.stride[0],
+                    (y & 1) ? 200 : 40, raw.width);
+    const long raw_before = adjacent_delta(raw);
+    umdplay::deinterlace_yuv420p(raw, umdplay::DeinterlaceMode::Off);
+    CHECK(adjacent_delta(raw) == raw_before);
+
+    // A flat field has no comb to repair even in Smart mode.
+    umdplay::VideoFrame flat;
+    flat.allocate(32, 32);
+    fill_plane(flat, 0, 128);
+    fill_plane(flat, 1, 128);
+    fill_plane(flat, 2, 128);
+    umdplay::deinterlace_yuv420p(flat, umdplay::DeinterlaceMode::Smart);
+    CHECK(flat.plane(0)[0] == 128);
+
     // Degenerate sizes are no-ops, not crashes.
     umdplay::VideoFrame tiny;
     tiny.allocate(2, 2);
     umdplay::deinterlace_yuv420p(tiny);
     umdplay::VideoFrame empty;
     umdplay::deinterlace_yuv420p(empty);
-    std::printf("[+] deinterlace: combing removed, edges and odd sizes safe\n");
+    umdplay::deinterlace_yuv420p(tiny, umdplay::DeinterlaceMode::Smart);
+    umdplay::deinterlace_yuv420p(empty, umdplay::DeinterlaceMode::Off);
+    std::printf("[+] deinterlace: combing removed, edges kept, odd sizes safe\n");
+}
+
+// --- A/V sync --------------------------------------------------------------
+
+void test_av_sync() {
+    const umdplay::AvSyncParams p;  // 20 ms early, 80 ms late
+
+    // In step, slightly ahead (one refresh) and slightly behind all present.
+    CHECK(umdplay::av_decide(10.000, 10.000, p) == umdplay::AvAction::Present);
+    CHECK(umdplay::av_decide(10.015, 10.000, p) == umdplay::AvAction::Present);
+    CHECK(umdplay::av_decide(9.950, 10.000, p) == umdplay::AvAction::Present);
+
+    // Far ahead is held for a later tick; far behind is dropped.
+    CHECK(umdplay::av_decide(10.300, 10.000, p) == umdplay::AvAction::Hold);
+    CHECK(umdplay::av_decide(9.700, 10.000, p) == umdplay::AvAction::Drop);
+
+    // Boundaries: exactly at the window edges still presents.
+    CHECK(umdplay::av_decide(10.000 + p.early, 10.000, p) == umdplay::AvAction::Present);
+    CHECK(umdplay::av_decide(10.000 - p.late, 10.000, p) == umdplay::AvAction::Present);
+
+    // No PTS / no clock: trust decode order rather than stalling.
+    CHECK(umdplay::av_decide(-1.0, 10.0, p) == umdplay::AvAction::Present);
+    CHECK(umdplay::av_decide(10.0, -1.0, p) == umdplay::AvAction::Present);
+
+    // The clock only moves with played audio.
+    CHECK(umdplay::av_audio_clock(5.0, 0) == 5.0);
+    CHECK(std::fabs(umdplay::av_audio_clock(5.0, 44100) - 6.0) < 1e-9);
+    CHECK(std::fabs(umdplay::av_audio_clock(5.0, 22050) - 5.5) < 1e-9);
+    CHECK(umdplay::av_audio_clock(-1.0, 1000) < 0.0);   // unanchored
+
+    // A 90-minute stream stays exact in double precision.
+    const double late = umdplay::av_audio_clock(0.0, 90 * 60 * 44100LL);
+    CHECK(std::fabs(late - 5400.0) < 1e-6);
+    std::printf("[+] av_sync: hold/drop/present windows and audio clock ok\n");
 }
 
 // --- YUV -> RGB ------------------------------------------------------------
@@ -359,6 +454,7 @@ int main() {
     test_native_decoder(fixture);
     test_decoder_bounds(fixture);
     test_deinterlace();
+    test_av_sync();
     test_yuv_convert();
 
     if (g_failures == 0) std::printf("[+] test_video_decoder: all checks passed\n");

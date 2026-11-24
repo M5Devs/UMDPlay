@@ -26,6 +26,10 @@ public:
     virtual double duration() const = 0;
     virtual bool   playing() const = 0;
 
+    /// Deinterlacing policy for field-coded pictures: "smart" (motion
+    /// adaptive), "blend" (1-2-1 everywhere) or "off".
+    virtual void setDeinterlaceMode(const QString& /*mode*/) {}
+
     virtual QString title() const { return {}; }
     virtual QString subtitle() const { return {}; }
     /// Chapter marks as {title, seconds} maps; empty when the stream has none.
@@ -49,7 +53,8 @@ class AveraPlayerController : public QObject {
     Q_PROPERTY(bool muted READ muted WRITE setMuted NOTIFY mutedChanged)
     Q_PROPERTY(bool osdVisible READ osdVisible NOTIFY osdVisibleChanged)
     Q_PROPERTY(bool settingsOpen READ settingsOpen WRITE setSettingsOpen NOTIFY settingsOpenChanged)
-    Q_PROPERTY(bool deinterlace READ deinterlace WRITE setDeinterlace NOTIFY deinterlaceChanged)
+    Q_PROPERTY(QString deinterlaceMode READ deinterlaceMode WRITE setDeinterlaceMode
+               NOTIFY deinterlaceModeChanged)
     Q_PROPERTY(QString aspectMode READ aspectMode WRITE setAspectMode NOTIFY aspectModeChanged)
 
 public:
@@ -76,8 +81,11 @@ public:
     bool osdVisible() const { return m_osdVisible; }
     bool settingsOpen() const { return m_settingsOpen; }
     void setSettingsOpen(bool open);
-    bool deinterlace() const { return m_deinterlace; }
-    void setDeinterlace(bool on);
+    /// "smart" | "off" | "blend"; applied to the backend immediately so the
+    /// choice takes effect on the next decoded picture.
+    QString deinterlaceMode() const { return m_deinterlaceMode; }
+    void setDeinterlaceMode(const QString& mode);
+    Q_INVOKABLE void cycleDeinterlaceMode();
     QString aspectMode() const { return m_aspect; }
     void setAspectMode(const QString& mode);
 
@@ -103,7 +111,7 @@ signals:
     void mutedChanged();
     void osdVisibleChanged();
     void settingsOpenChanged();
-    void deinterlaceChanged();
+    void deinterlaceModeChanged();
     void aspectModeChanged();
 
     /// The user asked for the disc's interactive menu.
@@ -126,7 +134,7 @@ private:
     bool       m_muted = false;
     bool       m_osdVisible = true;
     bool       m_settingsOpen = false;
-    bool       m_deinterlace = true;
+    QString    m_deinterlaceMode = QStringLiteral("smart");
     QString    m_aspect = QStringLiteral("fit");
 };
 

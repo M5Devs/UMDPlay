@@ -58,7 +58,8 @@ apps/avera-player/      Qt front end: binds Decoder to AveraUI and h264dec (H.26
 | **psmf_demuxer** | `include/psmf_demuxer.h`, `src/psmf_demuxer.cpp` | Native, libavformat-free MPEG-2 Program Stream (`.MPS`) demuxer over `DiscReader`: parses pack/system headers + PES in one pass, emits H.264 Annex-B access units (`0xE0`) with 90 kHz PTS/DTS + keyframe flags and Sony ATRAC3+ frames (`0xBD`) with dynamic `0F D0 48 <xx>` sync + measured stride. Estimates duration, seeks by byte offset + PES-PTS filter. |
 | **decoder** | `include/decoder.h`, `src/decoder.cpp` | Drives `PsmfDemuxer` → a `VideoDecoderBackend` (H.264) and an `AudioDecoderBackend` (ATRAC3+); seek/resync, A/V clock + PTS alignment, deinterlace option. Links **no** FFmpeg library. |
 | **video_decoder_backend** | `include/video_decoder_backend.h`, `include/video_frame.h`, `src/h264_video_decoder.cpp` | The video seam: push Annex-B access units, pull `VideoFrame` (tight YUV420P, one allocation). Default backend wraps `third_party/h264dec` + `h264.c` (SPS geometry/PAR); `src/ffmpeg_video_decoder.cpp` is the optional A/B backend (`-DUMDPLAY_NATIVE_VIDEO=OFF`). |
-| **deinterlace / yuv_convert** | `include/deinterlace.h`, `include/yuv_convert.h`, `src/deinterlace.cpp`, `src/yuv_convert.cpp` | In-memory replacements for libavfilter/yadif (vertical 1-2-1 blend of woven 480i frames) and libswscale (BT.601 YUV420P → RGB24/RGBA/BGRA, 16.16 fixed point). |
+| **deinterlace / yuv_convert** | `include/deinterlace.h`, `include/yuv_convert.h`, `src/deinterlace.cpp`, `src/yuv_convert.cpp` | In-memory replacements for libavfilter/yadif (`DeinterlaceMode` Off/Blend/Smart on woven 480i frames) and libswscale (BT.601 YUV420P → RGB24/RGBA/BGRA, 16.16 fixed point). |
+| **av_sync** | `include/av_sync.h`, `src/av_sync.cpp` | Audio-master picture pacing: `av_audio_clock()` (anchor PTS + played frames) and `av_decide()` → Hold/Drop/Present against an early/late window. |
 | **param_sfo** | `include/param_sfo.h`, `src/param_sfo.cpp` | Bounds-checked `PARAM.SFO` (`\0PSF`) parser — `TITLE`, `DISC_ID`, `CATEGORY`, `APP_VER`. |
 | **playlist_parser** | `include/playlist_parser.h`, `src/playlist_parser.cpp` | Big-endian `PLAYLIST.UMD` (`UMDV0088`/`UMDA0088`) — tracks, clips, 90 kHz chapter markers. |
 | **rco_parser** | `include/rco_parser.h`, `src/rco_parser.cpp` | Little-endian `.RCO` (`\0PRF`) container — TOC, embedded PNGs, object tree, VSMX blob + events. |
@@ -273,20 +274,34 @@ UMDPlay.
     random NAL units to keep them honest. The vendored C is compiled with the
     sanitizers **on** (unlike libchdr) — do not add `-fno-sanitize` to it.
 
-11. **Deinterlacing is a vertical 1-2-1 blend, not yadif.** `deinterlace_yuv420p`
-    runs in place on a frame whose `interlaced` flag is set, so one frame in is
-    still one frame out and the PSMF pacing is unaffected. It is a
-    field-weave killer, not a motion-adaptive filter: fast motion is slightly
-    soft vertically. Toggle with `Decoder::set_deinterlace()`.
+11. **Deinterlacing is a field-difference test, not a blend everywhere.**
+    `deinterlace_yuv420p(frame, mode)` runs in place on a frame whose
+    `interlaced` flag is set, so one frame in is still one frame out and the
+    PSMF pacing is unaffected. `Smart` (default) blends a pixel only when it
+    disagrees with the *opposite* field (rows y+-1) far more than with its own
+    (rows y+-2) — a woven moving edge fails the first test, a real horizontal
+    edge (cartoon line, title) fails both equally and stays sharp. A plain
+    `|up - 2*here + down|` comb test cannot tell those apart and ghosts
+    animation, which is why it is not used. `Blend` keeps the old 1-2-1
+    everywhere, `Off` is passthrough. Set with
+    `Decoder::set_deinterlace_mode()` (`set_deinterlace(bool)` still maps to
+    Blend/Off).
 
-12. **`--export-clip` shells out to the `ffmpeg` CLI.** Decoding can succeed
+12. **Sony PSMF sends PTS on very few video packets** (Family Guy: 8 of 150
+    frames). `Decoder` synthesises the presentation time for the rest
+    (`m_clock += 1/fps`, re-locking on every real PTS) and now writes it back
+    into `VideoFrame::pts`, so players can pace on `pts` instead of falling
+    back to decode order. Without it, audio-master pacing silently degenerates
+    into decode-paced playback with a 0.2-0.5 s picture lead.
+
+13. **`--export-clip` shells out to the `ffmpeg` CLI.** Decoding can succeed
     while export fails with "ffmpeg encode failed" if `ffmpeg` isn't on PATH.
 
-13. **Two `\x00PSF` signatures can exist** (a firmware-updater SFO and the
+14. **Two `\x00PSF` signatures can exist** (a firmware-updater SFO and the
     UMD-Video one); the UMD-Video SFO is the **later** sector. A disc with no
     `DISC_ID`/`CATEGORY` (e.g. Blue Harvest) is normal — report `(none)`.
 
-14. **MSYS2's `SDL2` is really `sdl2-compat` — the Windows bundle must ship
+15. **MSYS2's `SDL2` is really `sdl2-compat` — the Windows bundle must ship
     `SDL3.dll`.** On the CI runner `pacman -S mingw-w64-x86_64-SDL2` is silently
     swapped for `mingw-w64-x86_64-sdl2-compat` (its `SDL2.dll` `LoadLibrary`s
     `SDL3.dll` at runtime), so `ldd` never lists `SDL3.dll` and a naive DLL sweep

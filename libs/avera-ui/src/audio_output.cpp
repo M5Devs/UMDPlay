@@ -44,6 +44,13 @@ public:
         return static_cast<int>(m_buf.size() / m_channels);
     }
 
+    /// Frames the device has consumed (played or underrun-silenced) since the
+    /// ring was created — the audio clock the picture pacing runs against.
+    long long playedFrames() const {
+        QMutexLocker lock(&m_mutex);
+        return m_played;
+    }
+
     qint64 readData(char* data, qint64 maxlen) override {
         QMutexLocker lock(&m_mutex);
         // maxlen is bytes while the ring holds int16 samples: convert first, or
@@ -55,6 +62,7 @@ public:
             std::memset(data + have * sizeof(int16_t), 0, (want - have) * sizeof(int16_t));
         }
         m_buf.erase(m_buf.begin(), m_buf.begin() + static_cast<std::ptrdiff_t>(have));
+        m_played += static_cast<long long>(want / static_cast<size_t>(m_channels));
         return maxlen;  // always "succeed": silence keeps the device clock honest
     }
 
@@ -68,6 +76,7 @@ public:
 private:
     mutable QMutex       m_mutex;
     std::vector<int16_t> m_buf;
+    long long            m_played = 0;
     int                  m_channels;
 };
 
@@ -121,6 +130,10 @@ void AveraAudioOutput::pushPcm(const int16_t* interleaved, int frames) {
 }
 
 int AveraAudioOutput::queuedFrames() const { return m_ring ? m_ring->queuedFrames() : 0; }
+
+long long AveraAudioOutput::playedFrames() const {
+    return m_ring ? m_ring->playedFrames() : 0;
+}
 
 void AveraAudioOutput::setVolume(int percent) {
     m_volume = std::clamp(percent, 0, 100);

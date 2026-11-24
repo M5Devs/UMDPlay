@@ -1,6 +1,7 @@
 #pragma once
 
 #include "audio_decoder_backend.h"
+#include "deinterlace.h"
 #include "iso_reader.h"
 #include "psmf_demuxer.h"
 #include "video_decoder_backend.h"
@@ -62,11 +63,18 @@ public:
     bool has_audio() const { return m_audio_backend != nullptr; }
     double get_fps() const { return m_fps; }
 
-    // Enable/disable deinterlacing of decoded video frames. 480i NTSC UMD Video
-    // carries field-coded pictures; when enabled (default) they are blended
-    // vertically so fast motion renders without combing.
-    void set_deinterlace(bool on);
-    bool deinterlace_enabled() const { return m_deinterlace; }
+    // How to treat field-coded pictures. 480i NTSC UMD Video carries them;
+    // Smart (the default) repairs only the lines whose two fields disagree, so
+    // progressive content and hard animation edges stay sharp.
+    void set_deinterlace_mode(umdplay::DeinterlaceMode mode) { m_deinterlace = mode; }
+    umdplay::DeinterlaceMode deinterlace_mode() const { return m_deinterlace; }
+    void set_deinterlace(bool on) {
+        m_deinterlace = on ? umdplay::DeinterlaceMode::Blend
+                           : umdplay::DeinterlaceMode::Off;
+    }
+    bool deinterlace_enabled() const {
+        return m_deinterlace != umdplay::DeinterlaceMode::Off;
+    }
     // True if the most recently returned video frame was coded interlaced.
     bool last_frame_interlaced() const { return m_last_interlaced; }
 
@@ -164,6 +172,6 @@ private:
     bool             m_resync_video = false; // drop to next keyframe after a seek
     double           m_pts_anchor  = -1.0;  // video PTS of the first post-seek frame
 
-    bool             m_deinterlace      = true;
+    umdplay::DeinterlaceMode m_deinterlace = umdplay::DeinterlaceMode::Smart;
     bool             m_last_interlaced  = false;
 };

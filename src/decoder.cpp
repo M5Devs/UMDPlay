@@ -150,7 +150,8 @@ bool Decoder::receive_video(umdplay::VideoFrame& out) {
     if (!m_video_backend) return false;
     if (!m_video_backend->receive(out)) return false;
     m_last_interlaced = out.interlaced;
-    if (m_deinterlace && out.interlaced) umdplay::deinterlace_yuv420p(out);
+    if (out.interlaced && m_deinterlace != umdplay::DeinterlaceMode::Off)
+        umdplay::deinterlace_yuv420p(out, m_deinterlace);
     return true;
 }
 
@@ -326,6 +327,10 @@ FrameType Decoder::read_frame(umdplay::VideoFrame& video_frame,
     const double pts = video_frame.pts;
     if (pts >= 0.0) m_clock = pts;
     else m_clock += 1.0 / ((m_fps > 0.0 && m_fps < 240.0) ? m_fps : 29.97);
+    // Sony PSMF often omits PTS on all but a few video packets, so hand back
+    // the synthesised presentation time instead of "unknown": players pace on
+    // it, and a frame without a clock is a frame that cannot be synced.
+    if (pts < 0.0) video_frame.pts = m_clock;
     return FrameType::Video;
 }
 
@@ -367,10 +372,6 @@ bool Decoder::seek_absolute(double seconds) {
 }
 
 // --- options / introspection ----------------------------------------------
-
-void Decoder::set_deinterlace(bool on) {
-    m_deinterlace = on;
-}
 
 int Decoder::video_width() const {
     return m_video_backend ? m_video_backend->width() : 0;

@@ -86,7 +86,8 @@ license compatibility).
 **Decoding**
 - In-memory **MPEG-2 Program Stream** demuxing via a native `PsmfDemuxer` over
   `DiscReader` (no `libavformat`).
-- **H.264 AVC** video, with optional **480i `yadif` deinterlacing**.
+- **H.264 AVC** video, with in-memory **480i anti-ghosting** — `Smart` (motion
+  adaptive, the default), `Blend` or `Off`, selectable live.
 - **Sony PSMF ATRAC3+** audio reverse-engineered from **Private Stream 1
   (`0xBD`)** — class-byte-agnostic frame sync and a **measured** frame stride,
   so both 696-byte (video) and 1720-byte (music) discs decode.

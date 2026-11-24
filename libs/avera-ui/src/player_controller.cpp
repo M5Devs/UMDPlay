@@ -30,8 +30,12 @@ AveraPlayerController::~AveraPlayerController() = default;
 
 void AveraPlayerController::setBackend(AveraPlayerBackend* backend) {
     m_backend = backend;
-    if (m_backend) m_timer->start();
-    else m_timer->stop();
+    if (m_backend) {
+        m_backend->setDeinterlaceMode(m_deinterlaceMode);
+        m_timer->start();
+    } else {
+        m_timer->stop();
+    }
     emit stateChanged();
     emit positionChanged();
 }
@@ -115,10 +119,22 @@ void AveraPlayerController::setSettingsOpen(bool open) {
     }
 }
 
-void AveraPlayerController::setDeinterlace(bool on) {
-    if (on == m_deinterlace) return;
-    m_deinterlace = on;
-    emit deinterlaceChanged();
+void AveraPlayerController::setDeinterlaceMode(const QString& mode) {
+    const QString normalized = (mode == QLatin1String("off") || mode == QLatin1String("blend"))
+                                   ? mode
+                                   : QStringLiteral("smart");
+    if (normalized == m_deinterlaceMode) return;
+    m_deinterlaceMode = normalized;
+    if (m_backend) m_backend->setDeinterlaceMode(m_deinterlaceMode);
+    emit deinterlaceModeChanged();
+}
+
+void AveraPlayerController::cycleDeinterlaceMode() {
+    static const char* const kOrder[] = {"smart", "blend", "off"};
+    int at = 0;
+    for (int i = 0; i < 3; ++i)
+        if (m_deinterlaceMode == QLatin1String(kOrder[i])) at = i;
+    setDeinterlaceMode(QString::fromLatin1(kOrder[(at + 1) % 3]));
 }
 
 void AveraPlayerController::setAspectMode(const QString& mode) {

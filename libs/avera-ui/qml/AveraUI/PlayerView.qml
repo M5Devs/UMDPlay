@@ -59,6 +59,16 @@ Item {
         player: root.player
     }
 
+    // Live settings: reachable with S (or the Options pill on the hub) and
+    // applied to the next decoded picture, so the effect is visible at once.
+    SettingsPanel {
+        player: root.player
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: 26
+        visible: root.player ? root.player.settingsOpen : false
+    }
+
     MouseArea {
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton

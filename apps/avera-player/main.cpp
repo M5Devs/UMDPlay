@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <deque>
 #include <memory>
 #include <vector>
 
@@ -33,6 +34,7 @@
 #include "avera_ui/player_controller.h"
 #include "avera_ui/video_item.h"
 
+#include "av_sync.h"
 #include "decoder.h"
 #include "iso_reader.h"
 #include "param_sfo.h"
@@ -78,6 +80,7 @@ public:
     bool open() {
         if (!m_decoder.open_stream(m_iso, m_entry)) return false;
         m_audio->start(44100, 2);
+        m_decoder.set_deinterlace_mode(m_deinterlace);
         // The shell shows the disc's own title, never the raw .MPS file name.
         m_title = m_discTitle.isEmpty() ? QString::fromStdString(m_entry.name) : m_discTitle;
         m_duration = m_decoder.get_duration();
@@ -92,44 +95,64 @@ public:
 
     void setSurface(avera::AveraVideoItem* surface) { m_surface = surface; }
 
-    /// Decode at most one video frame. Returns false at end of stream.
-    bool pump() {
-        if (!m_playing) return false;
-        umdplay::VideoFrame frame;
-        std::vector<uint8_t> pcm;
+    /// Fill a short picture queue (which also pushes the PCM that keeps the
+    /// device fed), then present the oldest picture if the audio clock has
+    /// reached it. Pictures that are ahead are held for the next tick; pictures
+    /// that fell behind are dropped so picture and sound stay locked together.
+    void pump() {
+        if (!m_playing) return;
+        fillQueue();
 
-        // Drain until a picture shows up; audio is pushed as it comes.
-        for (int guard = 0; guard < 64; ++guard) {
-            const FrameType t = m_decoder.read_frame(frame, pcm);
-            if (!pcm.empty() && m_audio) {
-                m_audio->pushPcm(reinterpret_cast<const int16_t*>(pcm.data()),
-                                 static_cast<int>(pcm.size() / 4));
-                pcm.clear();
-            }
-            if (t == FrameType::Eof) { m_playing = false; return false; }
-            if (t != FrameType::Video || !frame.valid()) continue;
+        while (!m_queue.empty()) {
+            const double clock = audioClock();
+            if (clock < 0.0) { presentFront(); return; }  // no device: decode-paced
 
-            if (m_surface) {
-                m_surface->setFrame(frame.plane(0), frame.stride[0], frame.plane(1),
-                                    frame.stride[1], frame.plane(2), frame.stride[2],
-                                    frame.width, frame.height, frame.interlaced,
-                                    m_decoder.video_par());
+            switch (umdplay::av_decide(m_queue.front().pts, clock)) {
+            case umdplay::AvAction::Hold:
+                return;
+            case umdplay::AvAction::Drop:
+                ++m_dropped;
+                m_queue.pop_front();
+                continue;
+            case umdplay::AvAction::Present:
+                presentFront();
+                return;
             }
-            m_position = m_decoder.current_time();
-            if (++m_frames % 30 == 0)
-                std::fprintf(stderr, "[*] %d frames, t=%.2f\n", m_frames, m_position);
-            return true;
         }
-        return false;
+    }
+
+    /// Seconds the loudspeaker has reached, or -1 while the stream is not
+    /// anchored yet (no audio device, or nothing queued since the last seek).
+    double audioClock() const {
+        if (!m_audio || !m_audio->active() || m_audio_anchor_pts < 0.0) return -1.0;
+        return umdplay::av_audio_clock(m_audio_anchor_pts,
+                                       m_audio->playedFrames() - m_anchor_played);
     }
 
     // --- AveraPlayerBackend ---
-    void play() override { m_playing = true; }
+    void play() override {
+        m_playing = true;
+        // The device keeps counting through a pause, so resume from a clean
+        // anchor: drop the stale tail and let the next picture set the clock.
+        if (m_audio) m_audio->flush();
+        m_queue.clear();
+        m_audio_anchor_pts = -1.0;
+        m_anchor_played = m_audio ? m_audio->playedFrames() : 0;
+    }
     void pause() override { m_playing = false; }
-    void stop() override { m_playing = false; seekTo(0.0); }
+    void stop() override {
+        m_playing = false;
+        seekTo(0.0);
+        m_audio_anchor_pts = -1.0;
+    }
     void seekTo(double seconds) override {
         m_decoder.seek_absolute(seconds);
         if (m_audio) m_audio->flush();
+        m_queue.clear();
+        // Drop the old anchor: the first PCM after the seek re-anchors on its
+        // own PTS, so the pictures that follow cannot inherit the old offset.
+        m_audio_anchor_pts = -1.0;
+        m_anchor_played = m_audio ? m_audio->playedFrames() : 0;
         m_position = seconds;
     }
     double position() const override { return m_position; }
@@ -143,12 +166,72 @@ public:
             .arg(m_decoder.get_fps(), 0, 'f', 2);
     }
 
+    void setDeinterlaceMode(const QString& mode) override {
+        m_deinterlace = (mode == QLatin1String("off"))   ? umdplay::DeinterlaceMode::Off
+                        : (mode == QLatin1String("blend")) ? umdplay::DeinterlaceMode::Blend
+                                                           : umdplay::DeinterlaceMode::Smart;
+        m_decoder.set_deinterlace_mode(m_deinterlace);
+    }
+
     int frames() const { return m_frames; }
+    int droppedFrames() const { return m_dropped; }
     int videoWidth() const { return m_decoder.video_width(); }
     int videoHeight() const { return m_decoder.video_height(); }
     double fps() const { return m_decoder.get_fps(); }
 
 private:
+    /// Decode ahead by a couple of pictures so the audio queue never starves
+    /// between ticks. The first PCM batch after a start/seek anchors the clock.
+    void fillQueue() {
+        while (static_cast<int>(m_queue.size()) < kLookahead && decodeNext()) {}
+    }
+
+    bool decodeNext() {
+        umdplay::VideoFrame frame;
+        std::vector<uint8_t> pcm;
+        for (int guard = 0; guard < 64; ++guard) {
+            const FrameType t = m_decoder.read_frame(frame, pcm);
+            if (!pcm.empty()) {
+                if (m_audio) {
+                    m_audio->pushPcm(reinterpret_cast<const int16_t*>(pcm.data()),
+                                     static_cast<int>(pcm.size() / 4));
+                }
+                pcm.clear();
+            }
+            if (t == FrameType::Eof) { m_playing = false; return false; }
+            if (t != FrameType::Video || !frame.valid()) continue;
+            m_queue.push_back(std::move(frame));
+            return true;
+        }
+        return false;
+    }
+
+    void presentFront() {
+        umdplay::VideoFrame frame = std::move(m_queue.front());
+        m_queue.pop_front();
+        // Anchor the clock where picture and sound meet: the decoder aligns
+        // the PCM queue to the first picture's PTS, so the audio playing now
+        // *is* that picture's time.
+        if (m_audio_anchor_pts < 0.0 && m_audio && frame.pts >= 0.0) {
+            m_audio_anchor_pts = frame.pts;
+            m_anchor_played = m_audio->playedFrames();
+        }
+        if (m_surface) {
+            m_surface->setFrame(frame.plane(0), frame.stride[0], frame.plane(1),
+                                frame.stride[1], frame.plane(2), frame.stride[2],
+                                frame.width, frame.height, frame.interlaced,
+                                m_decoder.video_par());
+        }
+        m_position = frame.pts >= 0.0 ? frame.pts : m_decoder.current_time();
+        if (++m_frames % 30 == 0) {
+            const double clock = audioClock();
+            std::fprintf(stderr, "[*] %d frames, t=%.2f  drop=%d  drift=%+.0f ms  il=%d\n",
+                         m_frames, m_position, m_dropped,
+                         clock >= 0.0 ? (m_position - clock) * 1000.0 : 0.0,
+                         m_decoder.last_frame_interlaced() ? 1 : 0);
+        }
+    }
+
     std::string m_iso;
     MpsEntry m_entry;
     QString m_discTitle;
@@ -160,6 +243,12 @@ private:
     double m_duration = 0.0;
     bool m_playing = false;
     int m_frames = 0;
+    int m_dropped = 0;
+    umdplay::DeinterlaceMode m_deinterlace = umdplay::DeinterlaceMode::Smart;
+    static constexpr int kLookahead = 6;  ///< pictures decoded ahead of the clock
+    std::deque<umdplay::VideoFrame> m_queue;
+    double m_audio_anchor_pts = -1.0;   ///< PTS the queued audio starts at
+    long long m_anchor_played = 0;      ///< device cursor when it was anchored
 };
 
 struct DiscInfo {
@@ -416,9 +505,9 @@ int main(int argc, char** argv) {
         });
     }
 
-    // ~60 Hz tick, one picture per tick. With an audio device the queue is the
-    // clock; without one (headless) fall back to wall-clock pacing so playback
-    // still runs at 1x instead of stalling on an unplayed queue.
+    // ~60 Hz tick. With an audio device the backend paces pictures against the
+    // device clock (audio master); without one (headless) the wall clock stands
+    // in, so playback still runs at 1x instead of stalling on an unplayed queue.
     QElapsedTimer wall;
     wall.start();
     double wallOrigin = 0.0;
@@ -433,11 +522,7 @@ int main(int argc, char** argv) {
         if (pos + 0.25 < lastPos) { wall.restart(); wallOrigin = pos; }  // seeked back
         lastPos = pos;
 
-        if (audio.active()) {
-            if (audio.queuedFrames() >= 44100 / 4) return;
-        } else if (pos >= wallOrigin + wall.elapsed() / 1000.0) {
-            return;
-        }
+        if (!audio.active() && pos >= wallOrigin + wall.elapsed() / 1000.0) return;
         backend->pump();
     });
     tick.start();

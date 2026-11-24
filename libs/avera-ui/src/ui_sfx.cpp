@@ -104,7 +104,8 @@ bool AveraSfx::startDevice() {
     const QAudioDevice dev = QMediaDevices::defaultAudioOutput();
     if (dev.isNull() || !dev.isFormatSupported(fmt)) return false;
     m_sink = new QAudioSink(dev, fmt, this);
-    m_sink->setVolume(0.6);
+    // Chimes sit under dialogue, not over it.
+    m_sink->setVolume(0.40);
     m_sink->start(m_mixer);
     return true;
 }

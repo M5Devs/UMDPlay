@@ -55,6 +55,7 @@ qt_add_resources(avera_ui "avera_qml"
         qml/AveraUI/HubView.qml
         qml/AveraUI/PlayerView.qml
         qml/AveraUI/TransportOsd.qml
+        qml/AveraUI/SettingsPanel.qml
 )
 
 # Plus Jakarta Sans (SIL OFL 1.1) — the Stitch design's typeface. Bundled so the

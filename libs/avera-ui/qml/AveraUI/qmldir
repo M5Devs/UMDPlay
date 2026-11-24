@@ -14,3 +14,4 @@ TransportPill 1.0 TransportPill.qml
 HubView 1.0 HubView.qml
 PlayerView 1.0 PlayerView.qml
 TransportOsd 1.0 TransportOsd.qml
+SettingsPanel 1.0 SettingsPanel.qml

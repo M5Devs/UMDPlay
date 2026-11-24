@@ -34,9 +34,23 @@ Window {
                 else if (ev.key === Qt.Key_Escape) { root.chime("back"); ev.accepted = true }
             } else {
                 if (ev.key === Qt.Key_Space) { root.chime("select"); playerCtl.togglePlay(); ev.accepted = true }
-                else if (ev.key === Qt.Key_Left) { root.chime("navigate"); playerCtl.skip(-10); ev.accepted = true }
-                else if (ev.key === Qt.Key_Right) { root.chime("navigate"); playerCtl.skip(10); ev.accepted = true }
-                else if (ev.key === Qt.Key_Escape) { root.chime("back"); root.mode = "hub"; ev.accepted = true }
+                else if (ev.key === Qt.Key_Left) {
+                    root.chime("navigate")
+                    if (playerCtl.settingsOpen) playerCtl.cycleDeinterlaceMode()
+                    else playerCtl.skip(-10)
+                    ev.accepted = true
+                } else if (ev.key === Qt.Key_Right) {
+                    root.chime("navigate")
+                    if (playerCtl.settingsOpen) playerCtl.cycleDeinterlaceMode()
+                    else playerCtl.skip(10)
+                    ev.accepted = true
+                }
+                else if (ev.key === Qt.Key_S) { root.chime("select"); playerCtl.settingsOpen = !playerCtl.settingsOpen; ev.accepted = true }
+                else if (ev.key === Qt.Key_Escape) {
+                    if (playerCtl.settingsOpen) playerCtl.settingsOpen = false
+                    else { root.chime("back"); root.mode = "hub" }
+                    ev.accepted = true
+                }
             }
         }
 

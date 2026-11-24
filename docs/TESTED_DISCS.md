@@ -78,11 +78,15 @@ A second, deliberately *different* disc to prove nothing is Miku-specific.
 **What it exercised**
 
 - **480i NTSC deinterlacing.** Every frame on both discs carries
-  `AV_FRAME_FLAG_INTERLACED` (flags `0x8`/`0xA`). UMDPlay deinterlaces with
-  `yadif` via libavfilter (an **optional** dependency — without it, frames pass
-  through untouched and the build still works). The buffersrc args must pass
-  `range=`/`colorspace=` or FFmpeg spams *"Changing video frame properties on
-  the fly is not supported"*.
+  `AV_FRAME_FLAG_INTERLACED` (flags `0x8`/`0xA`), but the animation is often
+  progressive in an interlaced container: a frame-wide 1-2-1 blend softens it
+  for nothing. `src/deinterlace.cpp` therefore defaults to **Smart**, which
+  blends a pixel only when it disagrees with the opposite field (rows y+-1)
+  much more than with its own (rows y+-2). Measured on Family Guy Vol. 1
+  (frame 900, a genuinely combed picture): adjacent-line delta 7.74 (Off) ->
+  3.62 (Smart) vs 2.20 (Blend), while own-field detail stays 3.29 vs Blend's
+  2.54. On frames without combing Smart is bit-identical to Off
+  (`adj-line` 4.91 vs 4.90), where Blend loses ~20% of the detail.
 - **SFO without `DISC_ID` / `CATEGORY`.** Its own `PARAM.SFO` (sector 48)
   carries only `TITLE` + `PARENTAL_LEVEL`, so `DISC_ID: (none)` and
   `CATEGORY: (none)` are **correct**, not a bug. (Note: sector 32 holds the
