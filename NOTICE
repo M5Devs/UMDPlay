@@ -1,0 +1,78 @@
+UMDPlay — third-party and derived-code notices
+===============================================
+
+UMDPlay itself is distributed under the GNU General Public License v2.0
+(see LICENSE).
+
+This file records the components that are derived from, or bundled with,
+other projects, and the licences they are used under.
+
+
+1. ATRAC3+ decoder — LGPL-2.1-or-later
+--------------------------------------
+Files:
+  include/atrac3p_decoder.h
+  src/atrac3p_decoder.cpp
+  src/atrac3p/atrac3p_internal.h
+  src/atrac3p/atrac3p_parse.cpp
+  src/atrac3p/atrac3p_dsp.cpp
+  src/atrac3p/atrac3p_mdct.cpp
+  src/atrac3p/atrac3p_tables.{h,cpp}
+
+Derived from FFmpeg's ATRAC3+ decoder:
+  libavcodec/atrac3plus.c, atrac3plusdec.c, atrac3plusdsp.c,
+  atrac3plus_data.h, atrac.c, and the shared FFT/MDCT, bit-reader and VLC
+  helpers they build on (get_bits.h, vlc.c, fft/mdct, float_dsp, sinewin).
+
+  Copyright (c) 2010-2013 Maxim Poliakovski
+  Copyright (c) 2006-2013 Maxim Poliakovski, 2006-2008 Benjamin Larsson (atrac.c)
+  Copyright (c) 2000-2007 Fabrice Bellard, 2007 Alex Beregszaszi,
+                2007-2010 Michael Niedermayer, 2008 Loren Merritt (FFT/MDCT)
+
+  Licensed under the GNU Lesser General Public License, version 2.1 or (at
+  your option) any later version.  The full licence text is in
+  LICENSE.LGPL-2.1 and at <https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html>.
+
+  FFmpeg: <https://ffmpeg.org/>
+
+Cross-checked against the Jpcsp / vavi-sound-atrac Java port of the same
+decoder (<https://github.com/umjammer/vavi-sound-atrac>), which was used as a
+structural reference while verifying the port.
+
+Verification used FFmpeg's FATE ATRAC3+ test samples
+(<https://fate-suite.ffmpeg.org/atrac3p/>) as reference PCM; those samples are
+not redistributed with UMDPlay.
+
+
+2. FFmpeg — LGPL-2.1-or-later (linked, not bundled)
+---------------------------------------------------
+Video decoding (H.264), pixel-format conversion (libswscale) and optional
+yadif deinterlacing (libavfilter) use the system FFmpeg libraries at build
+time.  FFmpeg is dynamically linked and is not part of this source tree.
+Audio decoding no longer uses FFmpeg (see item 1): with the default
+`-DUMDPLAY_NATIVE_ATRAC3P=ON` the audio path is UMDPlay's own code and
+libswresample is not linked at all.
+
+
+3. Dear ImGui — MIT
+-------------------
+Fetched at configure time (pinned tag) and linked statically.  Not part of
+this source tree.  <https://github.com/ocornut/imgui>
+
+
+4. libchdr — BSD-3-Clause (with vendored lzma / zstd / miniz)
+-------------------------------------------------------------
+Fetched at configure time (pinned tag) for CHD disc-image support.  Not part
+of this source tree.  <https://github.com/rtissera/libchdr>
+
+
+5. stb_image — MIT / public domain
+----------------------------------
+Vendored single-header image loader in third_party/.
+<https://github.com/nothings/stb>
+
+
+6. SDL2 — zlib licence
+----------------------
+System library used for windowing, rendering and audio output.  Not part of
+this source tree.

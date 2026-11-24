@@ -110,7 +110,7 @@ license compatibility).
 | Component | Technology | Notes |
 |---|---|---|
 | Language | C++17 | Modern standard, max compiler compatibility |
-| Decoder | FFmpeg `libavcodec` / `libswscale` / `libswresample` | Native `PsmfDemuxer` feeds `libavcodec`; optional `libavfilter` for yadif (no `libavformat`) |
+| Decoder | Native `Atrac3PlusDecoder` + FFmpeg `libavcodec` (H.264) | `PsmfDemuxer` feeds the built-in ATRAC3+ decoder (`src/atrac3p/`, no FFmpeg, no `libswresample`) and `libavcodec` for H.264; `libswscale` + optional `libavfilter` (yadif). No `libavformat` |
 | Output & rendering | SDL2 | Software/GPU video, audio, input |
 | 10-foot UI | Dear ImGui (SDL2 + SDLRenderer2) | Immediate-mode WMC shell |
 | Image decode | stb_image / stb_image_write | `PARAM.SFO` art (`ICON0`/`PIC1`) + PNG screenshots |
@@ -376,6 +376,7 @@ Full details in the [CHD Compression Guide](docs/CHD_GUIDE.md).
 - [x] **Phase 4 — Interactive Menus & Chapters**: `PLAYLIST.UMD` / `CLPI0088`, real chapters, `.RCO` object tree + VSMX menu VM.
 - [x] **Phase 4.5 — Unified `DiscReader`**: ISO + CHD via libchdr.
 - [x] **Phase 6 (Step 1) — FFmpeg Independence**: native `PsmfDemuxer` replaces `libavformat` demuxing (ISO + CHD).
+- [x] **Phase 6 (Step 2) — Zero-FFmpeg audio**: native `Atrac3PlusDecoder` (`src/atrac3p/`) replaces `AV_CODEC_ID_ATRAC3P` + `libswresample`; 688/696 and 1712/1720-byte PSMF strides, verified against FFmpeg reference PCM.
 - [ ] **Phase 5 — PPSSPP integration**: expose a clean C-style API for native upstream integration.
 
 ---

@@ -97,6 +97,20 @@ bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
     m_duration = info.duration;
 
     // --- audio (Sony ATRAC3+) ---
+#if defined(UMDPLAY_NATIVE_ATRAC3P)
+    // Native decoder: no libavcodec/libswresample on the audio path. Frames are
+    // already delivered as raw ATRAC3+ payloads by the PSMF demuxer, which is
+    // exactly what Atrac3PlusDecoder expects.
+    if (info.has_audio) {
+        m_native_audio = std::make_unique<umdplay::Atrac3PlusDecoder>();
+        if (m_native_audio->init(2)) {
+            m_audio.stream_index = 1;
+            m_audio.block_align  = static_cast<int>(info.audio_stride);
+        } else {
+            m_native_audio.reset();
+        }
+    }
+#else
     if (info.has_audio) {
         const AVCodec* dec = avcodec_find_decoder(AV_CODEC_ID_ATRAC3P);
         if (dec) {
@@ -122,6 +136,7 @@ bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
             }
         }
     }
+#endif  // UMDPLAY_NATIVE_ATRAC3P
 
     if (m_video.stream_index == -1 && m_audio.stream_index == -1) return false;
 
@@ -161,7 +176,11 @@ void Decoder::close() {
     m_duration = 0.0;
     m_fps = 29.97;
     m_demux.close();
+#if defined(UMDPLAY_NATIVE_ATRAC3P)
+    m_native_audio.reset();
+#else
     if (m_swr_ctx) { swr_free(&m_swr_ctx); }
+#endif
     if (m_temp_audio_frame) { av_frame_free(&m_temp_audio_frame); }
     if (m_stashed_video) { av_frame_free(&m_stashed_video); }
     if (m_pkt) { av_packet_free(&m_pkt); }
@@ -207,6 +226,8 @@ void Decoder::flush_video() {
 }
 
 void Decoder::flush_audio() {
+    // The native decoder emits every access unit as soon as it is handed over,
+    // so only the FFmpeg path has a tail to drain.
     if (m_audio.codec_ctx) avcodec_send_packet(m_audio.codec_ctx, nullptr);
 }
 
@@ -253,11 +274,23 @@ void Decoder::pump_audio(int64_t target_samples) {
 // --- audio decode ---------------------------------------------------------
 
 void Decoder::decode_audio_packet(const umdplay::PsmfPacket& pkt) {
-    if (!m_audio.codec_ctx || pkt.data.empty()) return;
+    if (pkt.data.empty()) return;
 
     if (pkt.pts != umdplay::PSMF_NOPTS && m_psmf_next_pts == umdplay::PSMF_NOPTS) {
         m_psmf_next_pts = pkt.pts;
     }
+
+#if defined(UMDPLAY_NATIVE_ATRAC3P)
+    if (m_native_audio) {
+        const size_t before = m_pcm_ready.size();
+        m_native_audio->decode(pkt.data.data(), pkt.data.size(), m_pcm_ready);
+        const size_t added = m_pcm_ready.size() - before;
+        m_audio_samples += static_cast<int64_t>(added / (2 * sizeof(int16_t)));
+        if (added && !m_align_done) apply_align();
+        return;
+    }
+#endif
+    if (!m_audio.codec_ctx) return;
 
     av_packet_unref(m_pkt);
     m_pkt->data = const_cast<uint8_t*>(pkt.data.data());
@@ -273,6 +306,10 @@ void Decoder::decode_audio_packet(const umdplay::PsmfPacket& pkt) {
 }
 
 void Decoder::resample_to_s16(AVFrame* audio_frame) {
+#if defined(UMDPLAY_NATIVE_ATRAC3P)
+    (void)audio_frame;  // native path converts to S16 in Atrac3PlusDecoder
+    return;
+#else
     if (!m_swr_ctx || !audio_frame) return;
     const int out_samples = audio_frame->nb_samples;
     int dst_bufsize = av_samples_get_buffer_size(nullptr, 2, out_samples, AV_SAMPLE_FMT_S16, 0);
@@ -295,6 +332,7 @@ void Decoder::resample_to_s16(AVFrame* audio_frame) {
     m_audio_samples += converted;
 
     if (!m_align_done) apply_align();
+#endif
 }
 
 // Post-seek alignment: `m_pts_anchor` is the video PTS (seconds) of the first

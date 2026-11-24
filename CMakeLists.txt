@@ -19,6 +19,12 @@ option(UMDPLAY_WERROR "Treat project warnings as errors" OFF)
 # for the system-library leak suppressions (SDL2/dbus, Mesa/llvmpipe).
 option(UMDPLAY_SANITIZE "Build with ASan + UBSan (+ LSan)" OFF)
 
+# Use the built-in ATRAC3+ decoder (src/atrac3p/) instead of libavcodec's
+# atrac3p + libswresample. With this ON, libswresample is neither required nor
+# linked; the audio path is entirely UMDPlay's own code. Turn OFF to A/B the
+# audio against FFmpeg's decoder.
+option(UMDPLAY_NATIVE_ATRAC3P "Use the native ATRAC3+ decoder (no libswresample)" ON)
+
 # Project warning bar, selected per compiler so the build is clean under GCC,
 # Clang, MinGW and MSVC alike. Third-party code is silenced separately so
 # vendored sources never fail the project's -Werror.
@@ -55,7 +61,9 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(AVCODEC REQUIRED libavcodec)
 pkg_check_modules(AVUTIL REQUIRED libavutil)
 pkg_check_modules(SWSCALE REQUIRED libswscale)
-pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
+if(NOT UMDPLAY_NATIVE_ATRAC3P)
+    pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
+endif()
 # libavfilter is optional: it powers yadif deinterlacing of 480i content. When
 # absent the decoder passes interlaced frames through unchanged.
 pkg_check_modules(AVFILTER libavfilter)
@@ -183,6 +191,11 @@ add_library(umdplay_core STATIC
     src/param_sfo.cpp
     src/psmf_demuxer.cpp
     src/decoder.cpp
+    src/atrac3p_decoder.cpp
+    src/atrac3p/atrac3p_parse.cpp
+    src/atrac3p/atrac3p_dsp.cpp
+    src/atrac3p/atrac3p_mdct.cpp
+    src/atrac3p/atrac3p_tables.cpp
     src/recent.cpp
     src/gesture.cpp
     src/aspect.cpp
@@ -195,15 +208,28 @@ target_include_directories(umdplay_core PUBLIC
     ${chdr_SOURCE_DIR}/include
 )
 # Playback demuxing is native (PsmfDemuxer over DiscReader), so libavformat is
-# no longer linked or used; only libavcodec (H.264 + atrac3p decode), libavutil,
-# libswscale/libswresample and the optional libavfilter (yadif) remain. (Debian's
-# libavfilter.so itself carries a NEEDED entry for libavformat.so, so it can
-# still show in ldd — but nothing in UMDPlay calls it.)
-target_link_libraries(umdplay_core PUBLIC
-    chdr-static
-    ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES}
-    ${SWSCALE_LIBRARIES} ${SWRESAMPLE_LIBRARIES} ${AVFILTER_LIBRARIES}
-)
+# no longer linked or used. With UMDPLAY_NATIVE_ATRAC3P (default) the audio path
+# is fully self-contained too: only libavcodec (H.264), libavutil, libswscale
+# and the optional libavfilter (yadif) remain. (Debian's libavfilter.so itself
+# carries a NEEDED entry for libavformat.so, so it can still show in ldd — but
+# nothing in UMDPlay calls it.)
+if(UMDPLAY_NATIVE_ATRAC3P)
+    # Audio is decoded by src/atrac3p/ — only video still needs FFmpeg.
+    target_compile_definitions(umdplay_core PUBLIC UMDPLAY_NATIVE_ATRAC3P=1)
+    target_link_libraries(umdplay_core PUBLIC
+        chdr-static
+        ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES}
+        ${SWSCALE_LIBRARIES} ${AVFILTER_LIBRARIES}
+    )
+    message(STATUS "UMDPlay: native ATRAC3+ decoder — libswresample not linked")
+else()
+    target_link_libraries(umdplay_core PUBLIC
+        chdr-static
+        ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES}
+        ${SWSCALE_LIBRARIES} ${SWRESAMPLE_LIBRARIES} ${AVFILTER_LIBRARIES}
+    )
+    message(STATUS "UMDPlay: FFmpeg ATRAC3+ decoder + libswresample")
+endif()
 if(AVFILTER_FOUND)
     target_compile_definitions(umdplay_core PUBLIC UMDPLAY_HAVE_AVFILTER=1)
     message(STATUS "UMDPlay: libavfilter found — yadif deinterlacing enabled")

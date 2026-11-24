@@ -53,7 +53,7 @@ third_party/            Vendored stb_image (single header)
 | **iso_reader** | `include/iso_reader.h`, `src/iso_reader.cpp` | Walks the ISO 9660/UDF tree from the PVD to find `UMD_VIDEO/`/`UMD_MUSIC/` and `STREAM/`; enumerates `.MPS` streams, `RESOURCE/`, `CLIPINF/`, metadata. No fixed LBAs. |
 | **disc_reader** | `include/disc_reader.h`, `src/disc_reader.cpp` | Byte-range backend chosen by extension: `.iso` (positional read) or `.chd` (libchdr + decompressed-hunk cache). Everything reads through this. |
 | **psmf_demuxer** | `include/psmf_demuxer.h`, `src/psmf_demuxer.cpp` | Native, libavformat-free MPEG-2 Program Stream (`.MPS`) demuxer over `DiscReader`: parses pack/system headers + PES in one pass, emits H.264 Annex-B access units (`0xE0`) with 90 kHz PTS/DTS + keyframe flags and Sony ATRAC3+ frames (`0xBD`) with dynamic `0F D0 48 <xx>` sync + measured stride. Estimates duration, seeks by byte offset + PES-PTS filter. |
-| **decoder** | `include/decoder.h`, `src/decoder.cpp` | Drives `PsmfDemuxer` → `AVCodecContext` for H.264 decode (+ optional yadif) and `atrac3p`; seek/resync, A/V clock + PTS alignment. Uses `libavcodec`/`libavutil`/`libswscale`/`libswresample` (+ optional `libavfilter`), **not** `libavformat`. |
+| **decoder** | `include/decoder.h`, `src/decoder.cpp` | Drives `PsmfDemuxer` → `AVCodecContext` for H.264 decode (+ optional yadif) and → the native `Atrac3PlusDecoder` for audio; seek/resync, A/V clock + PTS alignment. Uses `libavcodec`/`libavutil`/`libswscale` (+ optional `libavfilter`) for video only, **not** `libavformat`; with `UMDPLAY_NATIVE_ATRAC3P` (default) `libswresample` is not linked. |
 | **param_sfo** | `include/param_sfo.h`, `src/param_sfo.cpp` | Bounds-checked `PARAM.SFO` (`\0PSF`) parser — `TITLE`, `DISC_ID`, `CATEGORY`, `APP_VER`. |
 | **playlist_parser** | `include/playlist_parser.h`, `src/playlist_parser.cpp` | Big-endian `PLAYLIST.UMD` (`UMDV0088`/`UMDA0088`) — tracks, clips, 90 kHz chapter markers. |
 | **rco_parser** | `include/rco_parser.h`, `src/rco_parser.cpp` | Little-endian `.RCO` (`\0PRF`) container — TOC, embedded PNGs, object tree, VSMX blob + events. |
@@ -65,6 +65,7 @@ third_party/            Vendored stb_image (single header)
 | **ui_manager** | `include/ui_manager.h`, `src/ui_manager.cpp` | SDL window/renderer, video texture upload, audio device + queue, demo textures. |
 | **clip_export** | `include/clip_export.h`, `src/clip_export.cpp` | Headless decode → MP4 (shells out to the `ffmpeg` CLI for H.264/AAC muxing). |
 | **gesture** / **aspect** / **recent** | matching headers | Touch/mouse gesture recognition, zoom/aspect modes, recent-disc persistence. |
+| **atrac3p_decoder** | `include/atrac3p_decoder.h`, `src/atrac3p_decoder.cpp`, `src/atrac3p/` | Native, FFmpeg-free ATRAC3+ decoder: bitstream parser, IMDCT + windowing, gain compensation, GHA tone synthesis, power compensation and the IPQF synthesis bank. Ported from FFmpeg's atrac3plus (LGPL-2.1+, see `NOTICE`). |
 | **logo (embedded)** | `include/umdplay_logo.h`, generated `umdplay_logo_data.cpp` | `assets/umdplay_logo.png` baked into the binary by `cmake/EmbedAsset.cmake`; drawn as the WMC hub header mark and set as the SDL window icon. |
 
 `main.cpp` wires them together: parse args → open disc → build hub state →
@@ -97,8 +98,8 @@ LSAN_OPTIONS=suppressions=tests/lsan.supp \
     ctest --test-dir build-san --output-on-failure
 ```
 
-`UMDPLAY_WERROR` and `UMDPLAY_SANITIZE` are first-class CMake options
-(`CMakeLists.txt`). CI also passes `-DCMAKE_CXX_FLAGS=-Werror`; both approaches
+`UMDPLAY_WERROR`, `UMDPLAY_SANITIZE` and `UMDPLAY_NATIVE_ATRAC3P` (default ON)
+are first-class CMake options (`CMakeLists.txt`). CI also passes `-DCMAKE_CXX_FLAGS=-Werror`; both approaches
 work. Vendored `libchdr`/`zstd`/`miniz` are compiled with `-w` and
 `-fno-sanitize=…` so their warnings/UB never fail a project run.
 
