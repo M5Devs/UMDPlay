@@ -3,6 +3,7 @@
 
 #if defined(_WIN32)
 #include <process.h>   // _spawnvp / _P_WAIT
+#include <windows.h>   // SearchPathA
 #else
 #include <sys/wait.h>
 #include <unistd.h>
@@ -11,15 +12,13 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
-
-extern "C" {
-#include <libswscale/swscale.h>
-}
 
 namespace fs = std::filesystem;
 
@@ -49,6 +48,30 @@ std::string temp_path(const std::string& tag) {
     return (fs::path(temp_dir()) / (stem + ".raw")).string();
 }
 
+// The encoder is the ffmpeg CLI, never a linked library. When it is missing the
+// export degrades to the raw intermediates instead of failing.
+bool ffmpeg_available() {
+#if defined(_WIN32)
+    char found[MAX_PATH];
+    return ::SearchPathA(nullptr, "ffmpeg.exe", nullptr, MAX_PATH, found, nullptr) > 0;
+#else
+    const char* path = std::getenv("PATH");
+    if (!path) return false;
+    std::string dirs(path);
+    size_t start = 0;
+    while (start <= dirs.size()) {
+        const size_t end = dirs.find(':', start);
+        const std::string dir = dirs.substr(start, end == std::string::npos
+                                                       ? std::string::npos
+                                                       : end - start);
+        if (!dir.empty() && ::access((dir + "/ffmpeg").c_str(), X_OK) == 0) return true;
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return false;
+#endif
+}
+
 bool run_ffmpeg(const std::string& out_path, int vw, int vh, double fps,
                 double duration, const std::string& video_raw,
                 const std::string& audio_raw) {
@@ -59,7 +82,7 @@ bool run_ffmpeg(const std::string& out_path, int vw, int vh, double fps,
 
     const char* argv[] = {
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-f", "rawvideo", "-pixel_format", "rgb24",
+        "-f", "rawvideo", "-pixel_format", "yuv420p",
         "-video_size", size_buf, "-framerate", fps_buf,
         "-i", video_raw.c_str(),
         "-f", "s16le", "-ar", "44100", "-ac", "2",
@@ -90,6 +113,60 @@ bool run_ffmpeg(const std::string& out_path, int vw, int vh, double fps,
 #endif
 }
 
+// Write the two raw intermediates next to `out_path` when ffmpeg is absent.
+// A 44-byte canonical WAV header keeps the audio playable on its own.
+bool write_raw_pair(const std::string& out_path, const std::string& video_raw,
+                    const std::string& audio_raw) {
+    const fs::path base(out_path);
+    const std::string yuv_path = base.string() + ".yuv";
+    const std::string wav_path = base.string() + ".wav";
+    std::error_code ec;
+    fs::copy_file(video_raw, yuv_path, fs::copy_options::overwrite_existing, ec);
+    if (ec) return false;
+
+    std::ifstream in(audio_raw, std::ios::binary);
+    if (!in) return false;
+    in.seekg(0, std::ios::end);
+    const auto audio_size = static_cast<uint32_t>(in.tellg());
+    in.seekg(0, std::ios::beg);
+
+    std::ofstream wav(wav_path, std::ios::binary);
+    if (!wav) return false;
+    const uint32_t riff_size = 36 + audio_size;
+    const uint32_t byte_rate = 44100 * 2 * 2;
+    wav.write("RIFF", 4);
+    wav.write(reinterpret_cast<const char*>(&riff_size), 4);
+    wav.write("WAVEfmt ", 8);
+    const uint32_t fmt_size = 16;
+    const uint16_t fmt_pcm = 1, channels = 2, block_align = 4, bits = 16;
+    const uint32_t rate = 44100;
+    wav.write(reinterpret_cast<const char*>(&fmt_size), 4);
+    wav.write(reinterpret_cast<const char*>(&fmt_pcm), 2);
+    wav.write(reinterpret_cast<const char*>(&channels), 2);
+    wav.write(reinterpret_cast<const char*>(&rate), 4);
+    wav.write(reinterpret_cast<const char*>(&byte_rate), 4);
+    wav.write(reinterpret_cast<const char*>(&block_align), 2);
+    wav.write(reinterpret_cast<const char*>(&bits), 2);
+    wav.write("data", 4);
+    wav.write(reinterpret_cast<const char*>(&audio_size), 4);
+    wav << in.rdbuf();
+    std::cout << "[+] clip_export: ffmpeg not found; wrote " << yuv_path
+              << " (YUV420P) and " << wav_path << " (S16LE 44.1 kHz stereo)\n";
+    return true;
+}
+
+// Write one YUV420P picture as tight planes (what ffmpeg's rawvideo wants).
+void write_yuv420p(std::ofstream& out, const umdplay::VideoFrame& f) {
+    for (int p = 0; p < 3; ++p) {
+        const int pw = p ? f.chroma_width() : f.width;
+        const int ph = p ? f.chroma_height() : f.height;
+        for (int y = 0; y < ph; ++y) {
+            out.write(reinterpret_cast<const char*>(f.plane(p) + static_cast<size_t>(y) * f.stride[p]),
+                      pw);
+        }
+    }
+}
+
 }  // namespace
 
 bool export_clip(const std::string& iso_path,
@@ -113,7 +190,8 @@ bool export_clip(const std::string& iso_path,
         return false;
     }
     std::cout << "[*] clip_export: video=" << decoder.video_codec_name()
-              << " " << vw << "x" << vh << " @" << fps << "fps, audio="
+              << " (" << decoder.video_backend_name() << ") "
+              << vw << "x" << vh << " @" << fps << "fps, audio="
               << (decoder.has_audio()
                       ? "ATRAC3+ (native PsmfDemuxer 0xBD)"
                       : "none")
@@ -136,19 +214,7 @@ bool export_clip(const std::string& iso_path,
         return false;
     }
 
-    SwsContext* sws = sws_getContext(vw, vh, AV_PIX_FMT_YUV420P,
-                                     vw, vh, AV_PIX_FMT_RGB24,
-                                     SWS_BILINEAR, nullptr, nullptr, nullptr);
-    if (!sws) {
-        std::cerr << "[-] clip_export: sws_getContext failed\n";
-        decoder.close();
-        return false;
-    }
-
-    AVFrame* frame = av_frame_alloc();
-    std::vector<uint8_t> rgb(static_cast<size_t>(vw) * vh * 3);
-    uint8_t* dst[4] = { rgb.data(), nullptr, nullptr, nullptr };
-    int dst_linesize[4] = { vw * 3, 0, 0, 0 };
+    umdplay::VideoFrame frame;
     std::vector<uint8_t> pcm;
 
     const double total_frames = duration_seconds * fps;
@@ -160,9 +226,7 @@ bool export_clip(const std::string& iso_path,
         const FrameType ft = decoder.read_frame(frame, pcm);
         if (ft == FrameType::Eof) break;
         if (ft == FrameType::Video) {
-            sws_scale(sws, frame->data, frame->linesize, 0, vh, dst, dst_linesize);
-            vf.write(reinterpret_cast<const char*>(rgb.data()),
-                     static_cast<std::streamsize>(rgb.size()));
+            write_yuv420p(vf, frame);
             ++video_frames;
         } else if (ft == FrameType::Audio && !pcm.empty()) {
             af.write(reinterpret_cast<const char*>(pcm.data()),
@@ -171,8 +235,6 @@ bool export_clip(const std::string& iso_path,
         }
     }
 
-    av_frame_free(&frame);
-    sws_freeContext(sws);
     decoder.close();
     vf.close();
     af.close();
@@ -189,8 +251,13 @@ bool export_clip(const std::string& iso_path,
 
     // Trim the clip to the frames actually decoded (a seek can shorten it).
     const double actual = video_frames / fps;
-    const bool ok = run_ffmpeg(out_path, vw, vh, fps, actual, video_raw, audio_raw);
-    if (!ok) std::cerr << "[-] clip_export: ffmpeg encode failed\n";
+    bool ok = false;
+    if (ffmpeg_available()) {
+        ok = run_ffmpeg(out_path, vw, vh, fps, actual, video_raw, audio_raw);
+        if (!ok) std::cerr << "[-] clip_export: ffmpeg encode failed\n";
+    } else {
+        ok = write_raw_pair(out_path, video_raw, audio_raw);
+    }
 
     std::remove(video_raw.c_str());
     std::remove(audio_raw.c_str());

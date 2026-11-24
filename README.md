@@ -16,7 +16,7 @@ firmware, no emulator, no extraction.**
 ![No firmware](https://img.shields.io/badge/Firmware-not%20required-brightgreen)
 ![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen)
 
-**Pure C++17 · FFmpeg + SDL2 · zero PSP firmware required**
+**Pure C++17 · zero FFmpeg · SDL2 · zero PSP firmware required**
 
 ---
 
@@ -48,9 +48,9 @@ Sony packaging.
 **UMDPlay** is the missing playback layer. It opens a UMD `.iso`/`.chd`
 directly, parses the disc's real filesystem, demuxes the MPEG-PS `.MPS`
 streams in memory with a **native, libavformat-free `PsmfDemuxer`**, and decodes
-both the **H.264** video and the **ATRAC3+** audio — then presents them in a
-couch-ready Windows Media Center shell, complete with the disc's **own
-interactive menus**.
+both the **H.264** video and the **ATRAC3+** audio with UMDPlay's **own
+decoders** (no FFmpeg at all) — then presents them in a couch-ready Windows
+Media Center shell, complete with the disc's **own interactive menus**.
 
 The long-term goal is a stable, low-overhead playback core that drops straight
 into PSP emulators such as **PPSSPP** (GPLv2 was chosen for exactly this
@@ -110,7 +110,7 @@ license compatibility).
 | Component | Technology | Notes |
 |---|---|---|
 | Language | C++17 | Modern standard, max compiler compatibility |
-| Decoder | Native `Atrac3PlusDecoder` + FFmpeg `libavcodec` (H.264) | `PsmfDemuxer` feeds the built-in ATRAC3+ decoder (`src/atrac3p/`, no FFmpeg, no `libswresample`) and `libavcodec` for H.264; `libswscale` + optional `libavfilter` (yadif). No `libavformat` |
+| Decoders | Native `Atrac3PlusDecoder` + `h264dec` (H.264) | `PsmfDemuxer` feeds the built-in ATRAC3+ decoder (`src/atrac3p/`) and the vendored H.264 decoder (`third_party/h264dec`, MIT). No `libavformat`, `libavcodec`, `libswscale`, `libswresample` or `libavfilter`: the player links **no FFmpeg library** |
 | Output & rendering | SDL2 | Software/GPU video, audio, input |
 | 10-foot UI | Dear ImGui (SDL2 + SDLRenderer2) | Immediate-mode WMC shell |
 | Image decode | stb_image / stb_image_write | `PARAM.SFO` art (`ICON0`/`PIC1`) + PNG screenshots |
@@ -138,14 +138,11 @@ Tagged releases ship ready-to-run bundles on the
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y cmake build-essential pkg-config \
-                        libavcodec-dev libavutil-dev \
-                        libswscale-dev libswresample-dev libsdl2-dev
-# Optional: 480i deinterlacing (yadif)
-sudo apt-get install -y libavfilter-dev
+sudo apt-get install -y cmake build-essential pkg-config libsdl2-dev
 # Optional: CJK font so Japanese disc titles render
 sudo apt-get install -y fonts-noto-cjk
-# Optional: ffmpeg CLI, needed only for --export-clip
+# Optional: ffmpeg CLI for --export-clip (it shells out to it; without it the
+# export writes raw .yuv + .wav instead)
 sudo apt-get install -y ffmpeg
 ```
 
@@ -192,9 +189,9 @@ The sources are portable to macOS (the POSIX branches compile unchanged under
 Apple Clang). With [Homebrew](https://brew.sh):
 
 ```bash
-brew install cmake pkg-config ffmpeg sdl2
+brew install cmake pkg-config sdl2
 
-export PKG_CONFIG_PATH="$(brew --prefix)/opt/ffmpeg/lib/pkgconfig:$(brew --prefix)/opt/sdl2/lib/pkgconfig"
+export PKG_CONFIG_PATH="$(brew --prefix)/opt/sdl2/lib/pkgconfig"
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DUMDPLAY_WERROR=ON
 cmake --build build -j"$(sysctl -n hw.ncpu)"
 cd build && ctest --output-on-failure
@@ -377,6 +374,7 @@ Full details in the [CHD Compression Guide](docs/CHD_GUIDE.md).
 - [x] **Phase 4.5 — Unified `DiscReader`**: ISO + CHD via libchdr.
 - [x] **Phase 6 (Step 1) — FFmpeg Independence**: native `PsmfDemuxer` replaces `libavformat` demuxing (ISO + CHD).
 - [x] **Phase 6 (Step 2) — Zero-FFmpeg audio**: native `Atrac3PlusDecoder` (`src/atrac3p/`) replaces `AV_CODEC_ID_ATRAC3P` + `libswresample`; 688/696 and 1712/1720-byte PSMF strides, verified against FFmpeg reference PCM.
+- [x] **Phase 6 (Step 3) — Zero-FFmpeg video**: vendored `h264dec` (MIT) behind `VideoDecoderBackend` replaces `libavcodec`; in-memory deinterlacing (`src/deinterlace.cpp`) replaces `libavfilter`/yadif and `src/yuv_convert.cpp` replaces `libswscale`. Bit-exact against the reference decoder, and the player links no FFmpeg library.
 - [ ] **Phase 5 — PPSSPP integration**: expose a clean C-style API for native upstream integration.
 
 ---

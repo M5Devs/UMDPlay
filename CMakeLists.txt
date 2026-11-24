@@ -25,6 +25,13 @@ option(UMDPLAY_SANITIZE "Build with ASan + UBSan (+ LSan)" OFF)
 # audio against FFmpeg's decoder.
 option(UMDPLAY_NATIVE_ATRAC3P "Use the native ATRAC3+ decoder (no libswresample)" ON)
 
+# Use the built-in H.264 decoder (third_party/h264dec) instead of libavcodec,
+# and the built-in YUV deinterlacer instead of libavfilter. With this ON the
+# player and core need no FFmpeg library at all. Turn OFF to build the optional
+# libavcodec backends and A/B the video against FFmpeg (they are only built
+# when FFmpeg is installed).
+option(UMDPLAY_NATIVE_VIDEO "Use the native H.264 decoder (no libavcodec)" ON)
+
 # Project warning bar, selected per compiler so the build is clean under GCC,
 # Clang, MinGW and MSVC alike. Third-party code is silenced separately so
 # vendored sources never fail the project's -Werror.
@@ -56,18 +63,23 @@ endif()
 include_directories(${PROJECT_SOURCE_DIR}/include)
 include_directories(${PROJECT_SOURCE_DIR}/third_party)
 
-# --- FFmpeg + SDL2 (system) ---
+# --- SDL2 (system) ---
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(AVCODEC REQUIRED libavcodec)
-pkg_check_modules(AVUTIL REQUIRED libavutil)
-pkg_check_modules(SWSCALE REQUIRED libswscale)
-if(NOT UMDPLAY_NATIVE_ATRAC3P)
-    pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
-endif()
-# libavfilter is optional: it powers yadif deinterlacing of 480i content. When
-# absent the decoder passes interlaced frames through unchanged.
-pkg_check_modules(AVFILTER libavfilter)
 pkg_check_modules(SDL2 REQUIRED sdl2)
+
+# --- FFmpeg (only for the optional A/B backends) ---
+# The default build decodes H.264 and ATRAC3+ with UMDPlay's own code and needs
+# no FFmpeg at all. Setting either NATIVE option to OFF pulls in the matching
+# libav* backend, which then has to be installed.
+set(UMDPLAY_USE_FFMPEG OFF)
+if(NOT UMDPLAY_NATIVE_VIDEO OR NOT UMDPLAY_NATIVE_ATRAC3P)
+    set(UMDPLAY_USE_FFMPEG ON)
+    pkg_check_modules(AVCODEC REQUIRED libavcodec)
+    pkg_check_modules(AVUTIL REQUIRED libavutil)
+    if(NOT UMDPLAY_NATIVE_ATRAC3P)
+        pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
+    endif()
+endif()
 
 # On macOS the SDL2main shim is unnecessary: it only redirects main() to
 # SDL_main() on Windows. Homebrew's SDL2 (the sdl2-compat layer) nevertheless
@@ -79,8 +91,7 @@ if(APPLE)
 endif()
 
 include_directories(
-    ${AVCODEC_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS}
-    ${SWSCALE_INCLUDE_DIRS} ${SWRESAMPLE_INCLUDE_DIRS} ${AVFILTER_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS} ${SWRESAMPLE_INCLUDE_DIRS}
     ${SDL2_INCLUDE_DIRS}
 )
 
@@ -89,8 +100,7 @@ include_directories(
 # /opt/homebrew/opt/*/lib, so pass the directories through or linking fails with
 # "ld: library 'SDL2' not found". Must precede the targets that link them.
 link_directories(
-    ${AVCODEC_LIBRARY_DIRS} ${AVUTIL_LIBRARY_DIRS}
-    ${SWSCALE_LIBRARY_DIRS} ${SWRESAMPLE_LIBRARY_DIRS} ${AVFILTER_LIBRARY_DIRS}
+    ${AVCODEC_LIBRARY_DIRS} ${AVUTIL_LIBRARY_DIRS} ${SWRESAMPLE_LIBRARY_DIRS}
     ${SDL2_LIBRARY_DIRS}
 )
 
@@ -158,6 +168,21 @@ foreach(_chdr_tgt chdr-static miniz zstd chdr-lzma)
     endif()
 endforeach()
 
+# --- h264dec (vendored H.264 decoder, MIT; see third_party/h264dec) ---
+# Pure C, standard library only. Compiled as its own static library with its
+# warnings silenced so vendored code never fails the project's -Werror.
+add_library(h264dec STATIC
+    third_party/h264dec/h264dec.c
+    third_party/h264dec/h264dec_slice.c
+    third_party/h264dec/h264dec_recon.c
+    third_party/h264dec/h264dec_deblock.c
+    third_party/h264dec/h264_cabac_tables.c
+    third_party/h264dec/h264.c
+)
+set_target_properties(h264dec PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
+target_include_directories(h264dec PUBLIC ${PROJECT_SOURCE_DIR}/third_party/h264dec)
+target_compile_options(h264dec PRIVATE ${UMDPLAY_THIRDPARTY_WARN_FLAGS})
+
 # stb single-header libs (implementation lives in src/stb_impl.cpp)
 add_library(stb_image STATIC src/stb_impl.cpp)
 target_include_directories(stb_image PUBLIC ${PROJECT_SOURCE_DIR}/third_party)
@@ -191,6 +216,9 @@ add_library(umdplay_core STATIC
     src/param_sfo.cpp
     src/psmf_demuxer.cpp
     src/decoder.cpp
+    src/h264_video_decoder.cpp
+    src/deinterlace.cpp
+    src/yuv_convert.cpp
     src/atrac3p_decoder.cpp
     src/atrac3p/atrac3p_parse.cpp
     src/atrac3p/atrac3p_dsp.cpp
@@ -204,37 +232,40 @@ add_library(umdplay_core STATIC
     src/vsmx_vm.cpp
     src/rco_menu.cpp
 )
+
+# Optional FFmpeg backends (A/B builds only; never part of the default build).
+if(UMDPLAY_USE_FFMPEG)
+    target_compile_definitions(umdplay_core PUBLIC UMDPLAY_FFMPEG_BACKENDS=1)
+    if(NOT UMDPLAY_NATIVE_VIDEO)
+        target_sources(umdplay_core PRIVATE src/ffmpeg_video_decoder.cpp)
+    endif()
+    if(NOT UMDPLAY_NATIVE_ATRAC3P)
+        target_sources(umdplay_core PRIVATE src/ffmpeg_audio_decoder.cpp)
+    endif()
+endif()
 target_include_directories(umdplay_core PUBLIC
     ${chdr_SOURCE_DIR}/include
 )
-# Playback demuxing is native (PsmfDemuxer over DiscReader), so libavformat is
-# no longer linked or used. With UMDPLAY_NATIVE_ATRAC3P (default) the audio path
-# is fully self-contained too: only libavcodec (H.264), libavutil, libswscale
-# and the optional libavfilter (yadif) remain. (Debian's libavfilter.so itself
-# carries a NEEDED entry for libavformat.so, so it can still show in ldd — but
-# nothing in UMDPlay calls it.)
+# Playback demuxing is native (PsmfDemuxer over DiscReader) and, by default,
+# so is everything else: H.264 comes from third_party/h264dec and ATRAC3+ from
+# src/atrac3p/, so umdplay_core links no FFmpeg library at all. The libav*
+# backends exist only for A/B builds (-DUMDPLAY_NATIVE_VIDEO=OFF /
+# -DUMDPLAY_NATIVE_ATRAC3P=OFF) and are linked in only then.
+target_link_libraries(umdplay_core PUBLIC chdr-static h264dec)
 if(UMDPLAY_NATIVE_ATRAC3P)
-    # Audio is decoded by src/atrac3p/ — only video still needs FFmpeg.
     target_compile_definitions(umdplay_core PUBLIC UMDPLAY_NATIVE_ATRAC3P=1)
-    target_link_libraries(umdplay_core PUBLIC
-        chdr-static
-        ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES}
-        ${SWSCALE_LIBRARIES} ${AVFILTER_LIBRARIES}
-    )
-    message(STATUS "UMDPlay: native ATRAC3+ decoder — libswresample not linked")
-else()
-    target_link_libraries(umdplay_core PUBLIC
-        chdr-static
-        ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES}
-        ${SWSCALE_LIBRARIES} ${SWRESAMPLE_LIBRARIES} ${AVFILTER_LIBRARIES}
-    )
-    message(STATUS "UMDPlay: FFmpeg ATRAC3+ decoder + libswresample")
 endif()
-if(AVFILTER_FOUND)
-    target_compile_definitions(umdplay_core PUBLIC UMDPLAY_HAVE_AVFILTER=1)
-    message(STATUS "UMDPlay: libavfilter found — yadif deinterlacing enabled")
+if(UMDPLAY_NATIVE_VIDEO)
+    target_compile_definitions(umdplay_core PUBLIC UMDPLAY_NATIVE_VIDEO=1)
+endif()
+if(UMDPLAY_USE_FFMPEG)
+    target_link_libraries(umdplay_core PUBLIC ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES})
+    if(NOT UMDPLAY_NATIVE_ATRAC3P)
+        target_link_libraries(umdplay_core PUBLIC ${SWRESAMPLE_LIBRARIES})
+    endif()
+    message(STATUS "UMDPlay: FFmpeg A/B backends enabled (libavcodec)")
 else()
-    message(STATUS "UMDPlay: libavfilter not found — interlaced frames pass through")
+    message(STATUS "UMDPlay: native H.264 + ATRAC3+ decoders — zero FFmpeg libraries")
 endif()
 target_compile_options(umdplay_core PRIVATE ${UMDPLAY_WARN_FLAGS})
 
@@ -359,6 +390,17 @@ target_compile_options(test_ui_sfx PRIVATE ${UMDPLAY_WARN_FLAGS})
 add_test(NAME test_ui_sfx COMMAND test_ui_sfx)
 set_tests_properties(test_ui_sfx PROPERTIES
     ENVIRONMENT "SDL_AUDIODRIVER=dummy")
+
+# Native H.264 decoder backend, deinterlacer and YUV converter. Decodes a
+# committed synthetic Annex-B stream (no disc needed), checks the deinterlacer
+# on a synthetic woven frame, and fuzzes truncated/corrupt NAL units.
+add_executable(test_video_decoder tests/test_video_decoder.cpp)
+target_link_libraries(test_video_decoder PRIVATE umdplay_core)
+target_compile_options(test_video_decoder PRIVATE ${UMDPLAY_WARN_FLAGS})
+add_test(NAME test_video_decoder COMMAND test_video_decoder)
+set_tests_properties(test_video_decoder PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    ENVIRONMENT "UMD_H264_FIXTURE=${PROJECT_SOURCE_DIR}/tests/fixtures/h264/testsrc2_720x480.h264")
 
 install(TARGETS umdplay DESTINATION bin)
 

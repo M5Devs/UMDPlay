@@ -383,6 +383,7 @@ public:
     void reset() override { m_dec.reset(); }
     int sample_rate() const override { return Atrac3PlusDecoder::kSampleRate; }
     int channels() const override { return m_dec.channels(); }
+    bool native() const override { return true; }
 
 private:
     Atrac3PlusDecoder m_dec;

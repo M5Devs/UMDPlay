@@ -16,12 +16,12 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Build Dependencies, FFmpeg & SDL2
+      - name: Install Build Dependencies & SDL2
+        # No FFmpeg development packages: the default build decodes H.264 and
+        # ATRAC3+ with UMDPlay's own code (third_party/h264dec, src/atrac3p).
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y cmake build-essential pkg-config \
-                                  libavformat-dev libavcodec-dev libavutil-dev \
-                                  libswscale-dev libswresample-dev libavfilter-dev \
                                   libsdl2-dev xvfb fonts-noto-cjk
 
       - name: Configure CMake
@@ -39,6 +39,16 @@ jobs:
         run: |
           ls -lh build/bin/umdplay
           SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ./build/bin/umdplay || true
+
+      - name: Assert no FFmpeg libraries are linked
+        # The whole point of the native decoders: the player must not depend on
+        # libavcodec/libavformat/libavutil/libswscale/libswresample/libavfilter.
+        run: |
+          if ldd build/bin/umdplay | grep -E 'libav(codec|format|util|filter)|libsw(scale|resample)'; then
+            echo "::error::umdplay links an FFmpeg library; the native decoders regressed"
+            exit 1
+          fi
+          echo "umdplay links no FFmpeg library"
 
       - name: Verify 10-foot UI Renders (Xvfb)
         # --demo renders the hub with synthetic data (no copyrighted assets),
@@ -69,6 +79,35 @@ jobs:
           path: |
             /tmp/wmc_ui_*.png
             /tmp/player_osd.png
+
+  build-ffmpeg-ab:
+    name: FFmpeg A/B Backends (Linux)
+    # The optional libav* backends are only built when the native decoders are
+    # switched off. They are kept compiling so a bisect can still compare
+    # against FFmpeg on a machine that has it.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies, FFmpeg & SDL2
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake build-essential pkg-config \
+                                  libavcodec-dev libavutil-dev libswresample-dev \
+                                  libsdl2-dev
+
+      - name: Configure (FFmpeg backends)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DUMDPLAY_WERROR=ON \
+                -DUMDPLAY_NATIVE_VIDEO=OFF -DUMDPLAY_NATIVE_ATRAC3P=OFF
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Run Tests
+        working-directory: build
+        run: ctest --output-on-failure
 
   build-macos:
     name: macOS (${{ matrix.arch }}) Build
@@ -108,16 +147,17 @@ jobs:
           restore-keys: |
             brew-${{ runner.os }}-${{ matrix.arch }}-
 
-      - name: Install Build Dependencies, FFmpeg & SDL2
+      - name: Install Build Dependencies & SDL2
         # Install bottles (prebuilt) only; no `brew update`, so we stay on the
-        # bottled versions that match the runner image.
-        run: brew install cmake pkg-config ffmpeg sdl2
+        # bottled versions that match the runner image. No FFmpeg: the default
+        # build uses the native H.264/ATRAC3+ decoders.
+        run: brew install cmake pkg-config sdl2
 
       - name: Configure CMake
         # Treat project warnings as errors so CI enforces the zero-warning bar
         # (matches the Linux and Windows jobs).
         run: |
-          export PKG_CONFIG_PATH="$(brew --prefix)/opt/ffmpeg/lib/pkgconfig:$(brew --prefix)/opt/sdl2/lib/pkgconfig"
+          export PKG_CONFIG_PATH="$(brew --prefix)/opt/sdl2/lib/pkgconfig"
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DUMDPLAY_WERROR=ON
 
       - name: Build UMDPlay Executable

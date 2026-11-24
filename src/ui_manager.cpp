@@ -105,16 +105,16 @@ void UiManager::update_texture_size(int width, int height) {
     }
 }
 
-void UiManager::update_video_texture(AVFrame* frame) {
-    if (!m_renderer || !frame) return;
-    update_texture_size(frame->width, frame->height);
+void UiManager::update_video_texture(const umdplay::VideoFrame& frame) {
+    if (!m_renderer || !frame.valid()) return;
+    update_texture_size(frame.width, frame.height);
     if (m_texture) {
         SDL_UpdateYUVTexture(
             m_texture,
             nullptr,
-            frame->data[0], frame->linesize[0],
-            frame->data[1], frame->linesize[1],
-            frame->data[2], frame->linesize[2]
+            frame.plane(0), frame.stride[0],
+            frame.plane(1), frame.stride[1],
+            frame.plane(2), frame.stride[2]
         );
     }
 }
@@ -130,8 +130,8 @@ void UiManager::update_demo_texture(const uint8_t* yuv, int width, int height) {
                          yuv + static_cast<size_t>(width) * height + cw * ch, cw);
 }
 
-void UiManager::render_video_frame(AVFrame* frame) {
-    if (!m_renderer || !frame) return;
+void UiManager::render_video_frame(const umdplay::VideoFrame& frame) {
+    if (!m_renderer || !frame.valid()) return;
     update_video_texture(frame);
     if (m_texture) {
         SDL_RenderClear(m_renderer);

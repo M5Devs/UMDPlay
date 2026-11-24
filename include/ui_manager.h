@@ -1,13 +1,11 @@
 #pragma once
 
+#include "video_frame.h"
+
 #include <SDL2/SDL.h>
 #include <cstdint>
 #include <string>
 #include <vector>
-
-extern "C" {
-#include <libavcodec/avcodec.h>
-}
 
 enum class UserAction {
     None,
@@ -31,7 +29,7 @@ public:
     void set_window_icon();
 
     // Upload a decoded frame into the streaming video texture (no present).
-    void update_video_texture(AVFrame* frame);
+    void update_video_texture(const umdplay::VideoFrame& frame);
     // Upload a synthetic planar YUV420P image (Y then U then V), for demos.
     void update_demo_texture(const uint8_t* yuv, int width, int height);
     void queue_audio(const uint8_t* data, uint32_t len);
@@ -57,7 +55,7 @@ public:
     bool  muted() const { return m_muted; }
 
     // Legacy single-shot present used by simple callers.
-    void render_video_frame(AVFrame* frame);
+    void render_video_frame(const umdplay::VideoFrame& frame);
 
     UserAction handle_events();
 

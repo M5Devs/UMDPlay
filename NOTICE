@@ -44,14 +44,43 @@ Verification used FFmpeg's FATE ATRAC3+ test samples
 not redistributed with UMDPlay.
 
 
-2. FFmpeg — LGPL-2.1-or-later (linked, not bundled)
----------------------------------------------------
-Video decoding (H.264), pixel-format conversion (libswscale) and optional
-yadif deinterlacing (libavfilter) use the system FFmpeg libraries at build
-time.  FFmpeg is dynamically linked and is not part of this source tree.
-Audio decoding no longer uses FFmpeg (see item 1): with the default
-`-DUMDPLAY_NATIVE_ATRAC3P=ON` the audio path is UMDPlay's own code and
-libswresample is not linked at all.
+2. h264dec — MIT (vendored)
+----------------------------
+Files:
+  third_party/h264dec/h264dec.c
+  third_party/h264dec/h264dec.h
+  third_party/h264dec/h264dec_int.h
+  third_party/h264dec/h264dec_slice.c
+  third_party/h264dec/h264dec_recon.c
+  third_party/h264dec/h264dec_deblock.c
+  third_party/h264dec/h264_cabac_tables.{h,c}
+  third_party/h264dec/h264.{h,c}
+
+Taken from the standalone UMD Video player by xesf:
+  <https://github.com/xesf/umd-player>
+
+  Copyright (c) 2025 xesf.  Licensed under the MIT licence; the full text is
+  in third_party/h264dec/LICENSE.
+
+Local changes (all documented in third_party/h264dec/README.md): intra
+prediction falls back to DC when a corrupt stream selects a mode whose
+neighbour is outside the picture, and a few shifts of negative values were
+rewritten as multiplications so the code is clean under UBSan.  Neither
+change affects the decoded output.
+
+The H.264 decode path (include/video_decoder_backend.h,
+src/h264_video_decoder.cpp) and the in-memory deinterlacer
+(src/deinterlace.cpp) replace libavcodec, libswscale and libavfilter: the
+default build links no FFmpeg library at all.
+
+
+2b. FFmpeg — LGPL-2.1-or-later (optional A/B build only)
+--------------------------------------------------------
+Setting `-DUMDPLAY_NATIVE_VIDEO=OFF` or `-DUMDPLAY_NATIVE_ATRAC3P=OFF` builds
+the optional libav* decoder backends (src/ffmpeg_video_decoder.cpp,
+src/ffmpeg_audio_decoder.cpp), which link the system libavcodec/libavutil (and
+libswresample for audio).  Those libraries are not part of this source tree and
+are never used by a default build.
 
 
 3. Dear ImGui — MIT

@@ -398,7 +398,7 @@ int main() {
               << "  dur=" << decoder.get_duration() << "s\n";
 
     // Decode up to ~4 seconds worth of audio, interleaved with video frames.
-    AVFrame* vframe = av_frame_alloc();
+    umdplay::VideoFrame vframe;
     std::vector<uint8_t> pcm;
     size_t total_pcm = 0;
     int nonzero = 0, video_frames = 0, audio_chunks = 0;
@@ -418,7 +418,6 @@ int main() {
             }
         }
     }
-    av_frame_free(&vframe);
     const bool had_audio = decoder.has_audio();
     decoder.close();
 

@@ -569,7 +569,7 @@ int main(int argc, char** argv) {
     // --- Playback state ---
     Mode mode = Mode::Hub;
     Decoder decoder;
-    AVFrame* video_frame = av_frame_alloc();
+    umdplay::VideoFrame video_frame;
     std::vector<uint8_t> audio_pcm;
     bool paused = false;
     bool osd_visible = true;
@@ -1083,7 +1083,6 @@ int main(int argc, char** argv) {
     for (auto& it : recent_items) destroy_disc_textures(it.disc);
     destroy_disc_textures(active.disc);
     if (pad) SDL_GameControllerClose(pad);
-    av_frame_free(&video_frame);
     close_decoder();
     ui_sfx.close();
     wmc.close();

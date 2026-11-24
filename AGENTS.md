@@ -17,7 +17,8 @@ UMDPlay is a C++17 playback/preservation engine for Sony **UMD Video** discs.
 It opens a UMD `.iso`/`.chd`, walks the UDF/ISO 9660 filesystem, demuxes the
 MPEG-PS `.MPS` streams in memory with a native `PsmfDemuxer` reading straight
 from `DiscReader`, and decodes **H.264** video + **Sony PSMF ATRAC3+** audio
-through FFmpeg `libavcodec` (no `libavformat`). It ships a Windows Media
+through UMDPlay's own decoders — vendored `h264dec` (MIT) for video and
+`src/atrac3p/` for audio, so **no FFmpeg library is linked at all**. It ships a Windows Media
 Center 10-foot UI, an interactive `.RCO`/VSMX disc-menu renderer, and headless
 CLI tooling (`--probe`, `--export-clip`, `--demo`).
 
@@ -40,7 +41,7 @@ docs/                   ARCHITECTURE.md, TESTED_DISCS.md, CHD_GUIDE.md
 assets/                 Brand art: umdplay_logo.png (official, embedded in the
                         binary), umdplay_flat.png, umdplay.ico + umdplay.rc (Windows)
 screenshots/            README showcase images (tracked; everything else *.png ignored)
-third_party/            Vendored stb_image (single header)
+third_party/            Vendored stb_image (single header) and h264dec (H.264)
 .github/workflows/      ci.yml (Linux GCC + macOS arm64/x86_64: -Werror, ctest, Xvfb)
 ```
 
@@ -53,7 +54,9 @@ third_party/            Vendored stb_image (single header)
 | **iso_reader** | `include/iso_reader.h`, `src/iso_reader.cpp` | Walks the ISO 9660/UDF tree from the PVD to find `UMD_VIDEO/`/`UMD_MUSIC/` and `STREAM/`; enumerates `.MPS` streams, `RESOURCE/`, `CLIPINF/`, metadata. No fixed LBAs. |
 | **disc_reader** | `include/disc_reader.h`, `src/disc_reader.cpp` | Byte-range backend chosen by extension: `.iso` (positional read) or `.chd` (libchdr + decompressed-hunk cache). Everything reads through this. |
 | **psmf_demuxer** | `include/psmf_demuxer.h`, `src/psmf_demuxer.cpp` | Native, libavformat-free MPEG-2 Program Stream (`.MPS`) demuxer over `DiscReader`: parses pack/system headers + PES in one pass, emits H.264 Annex-B access units (`0xE0`) with 90 kHz PTS/DTS + keyframe flags and Sony ATRAC3+ frames (`0xBD`) with dynamic `0F D0 48 <xx>` sync + measured stride. Estimates duration, seeks by byte offset + PES-PTS filter. |
-| **decoder** | `include/decoder.h`, `src/decoder.cpp` | Drives `PsmfDemuxer` → `AVCodecContext` for H.264 decode (+ optional yadif) and → the native `Atrac3PlusDecoder` for audio; seek/resync, A/V clock + PTS alignment. Uses `libavcodec`/`libavutil`/`libswscale` (+ optional `libavfilter`) for video only, **not** `libavformat`; with `UMDPLAY_NATIVE_ATRAC3P` (default) `libswresample` is not linked. |
+| **decoder** | `include/decoder.h`, `src/decoder.cpp` | Drives `PsmfDemuxer` → a `VideoDecoderBackend` (H.264) and an `AudioDecoderBackend` (ATRAC3+); seek/resync, A/V clock + PTS alignment, deinterlace option. Links **no** FFmpeg library. |
+| **video_decoder_backend** | `include/video_decoder_backend.h`, `include/video_frame.h`, `src/h264_video_decoder.cpp` | The video seam: push Annex-B access units, pull `VideoFrame` (tight YUV420P, one allocation). Default backend wraps `third_party/h264dec` + `h264.c` (SPS geometry/PAR); `src/ffmpeg_video_decoder.cpp` is the optional A/B backend (`-DUMDPLAY_NATIVE_VIDEO=OFF`). |
+| **deinterlace / yuv_convert** | `include/deinterlace.h`, `include/yuv_convert.h`, `src/deinterlace.cpp`, `src/yuv_convert.cpp` | In-memory replacements for libavfilter/yadif (vertical 1-2-1 blend of woven 480i frames) and libswscale (BT.601 YUV420P → RGB24/RGBA/BGRA, 16.16 fixed point). |
 | **param_sfo** | `include/param_sfo.h`, `src/param_sfo.cpp` | Bounds-checked `PARAM.SFO` (`\0PSF`) parser — `TITLE`, `DISC_ID`, `CATEGORY`, `APP_VER`. |
 | **playlist_parser** | `include/playlist_parser.h`, `src/playlist_parser.cpp` | Big-endian `PLAYLIST.UMD` (`UMDV0088`/`UMDA0088`) — tracks, clips, 90 kHz chapter markers. |
 | **rco_parser** | `include/rco_parser.h`, `src/rco_parser.cpp` | Little-endian `.RCO` (`\0PRF`) container — TOC, embedded PNGs, object tree, VSMX blob + events. |
@@ -98,7 +101,8 @@ LSAN_OPTIONS=suppressions=tests/lsan.supp \
     ctest --test-dir build-san --output-on-failure
 ```
 
-`UMDPLAY_WERROR`, `UMDPLAY_SANITIZE` and `UMDPLAY_NATIVE_ATRAC3P` (default ON)
+`UMDPLAY_WERROR`, `UMDPLAY_SANITIZE`, `UMDPLAY_NATIVE_ATRAC3P` and
+`UMDPLAY_NATIVE_VIDEO` (both default ON)
 are first-class CMake options (`CMakeLists.txt`). CI also passes `-DCMAKE_CXX_FLAGS=-Werror`; both approaches
 work. Vendored `libchdr`/`zstd`/`miniz` are compiled with `-w` and
 `-fno-sanitize=…` so their warnings/UB never fail a project run.
@@ -116,7 +120,9 @@ SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
 ### Test suites (10)
 
 `test_psmf_demuxer` (synthetic MPEG-PS `0xE0`/`0xBD` + PTS + variable stride +
-seek; optional real-ISO demux), `test_audio_decoder` (PSMF stride detection +
+seek; optional real-ISO demux), `test_video_decoder` (native H.264 backend on a
+committed 11-frame Annex-B fixture + truncated/corrupt NAL fuzzing, the
+deinterlacer and the YUV converter), `test_audio_decoder` (PSMF stride detection +
 optional real-ISO decode), `test_param_sfo`, `test_recent`, `test_playback`,
 `test_gesture`, `test_playlist` (optional real disc via `UMD_ISO=`),
 `test_chd` (committed `fixtures/pattern.chd`), `test_iso_reader` (synthetic ISO,
@@ -196,19 +202,40 @@ UMDPlay.
    with "No .MPS/.PMF files found in STREAM/". Confirm `chdman info` shows
    `Unit Size: 2048`.
 
-9. **libavfilter is optional.** yadif deinterlacing is guarded by
-   `UMDPLAY_HAVE_AVFILTER`. A build without it must still compile and pass
-   frames through. Pass `range=`/`colorspace=` in the buffersrc args or FFmpeg
-   spams "Changing video frame properties on the fly is not supported".
+9. **The video path is `h264dec`, and it says what it cannot do.** UMD H.264 is
+   Main profile, CABAC, 8-bit 4:2:0, frame or field pictures (PAFF) — all
+   supported, bit-exact with the reference decoding process. It **rejects**
+   CAVLC, MBAFF, implicit weighted prediction, memory management commands
+   (MMCO) and temporal direct mode; a stream that needs them decodes up to
+   that point and then returns an error (the frame is skipped, playback
+   continues). UMD Video discs do not use them (the reference player decodes
+   every disc it ships with), but a hand-made `x264 --interlaced` test clip
+   will fail: x264 emits MBAFF, not PAFF, so it cannot be used as a fixture.
 
-10. **`--export-clip` shells out to the `ffmpeg` CLI.** Decoding can succeed
+10. **`h264dec` needed two hardening patches — keep them.** ASan found a real
+    heap-buffer-overflow in `h264dec_intra16x16`/`h264dec_intra_chroma`: they
+    read `dst - stride` (the row above) unconditionally, which is before the
+    plane when a corrupt stream selects vertical/plane prediction at the top
+    row. Both now fall back to DC when the neighbour is missing. A few shifts
+    of negative values became multiplications (UBSan). Details in
+    `third_party/h264dec/README.md`; `test_video_decoder` fuzzes truncated and
+    random NAL units to keep them honest. The vendored C is compiled with the
+    sanitizers **on** (unlike libchdr) — do not add `-fno-sanitize` to it.
+
+11. **Deinterlacing is a vertical 1-2-1 blend, not yadif.** `deinterlace_yuv420p`
+    runs in place on a frame whose `interlaced` flag is set, so one frame in is
+    still one frame out and the PSMF pacing is unaffected. It is a
+    field-weave killer, not a motion-adaptive filter: fast motion is slightly
+    soft vertically. Toggle with `Decoder::set_deinterlace()`.
+
+12. **`--export-clip` shells out to the `ffmpeg` CLI.** Decoding can succeed
     while export fails with "ffmpeg encode failed" if `ffmpeg` isn't on PATH.
 
-11. **Two `\x00PSF` signatures can exist** (a firmware-updater SFO and the
+13. **Two `\x00PSF` signatures can exist** (a firmware-updater SFO and the
     UMD-Video one); the UMD-Video SFO is the **later** sector. A disc with no
     `DISC_ID`/`CATEGORY` (e.g. Blue Harvest) is normal — report `(none)`.
 
-12. **MSYS2's `SDL2` is really `sdl2-compat` — the Windows bundle must ship
+14. **MSYS2's `SDL2` is really `sdl2-compat` — the Windows bundle must ship
     `SDL3.dll`.** On the CI runner `pacman -S mingw-w64-x86_64-SDL2` is silently
     swapped for `mingw-w64-x86_64-sdl2-compat` (its `SDL2.dll` `LoadLibrary`s
     `SDL3.dll` at runtime), so `ldd` never lists `SDL3.dll` and a naive DLL sweep
@@ -250,6 +277,9 @@ UMDPlay.
 
 ### Pre-push checklist
 
+0. `ldd build/bin/umdplay` → **no `libav*`/`libsw*`**. The default build must
+   link zero FFmpeg libraries (CI asserts it); the A/B job is the only place
+   libavcodec is allowed.
 1. `cmake -B build-werror -DUMDPLAY_WERROR=ON && cmake --build build-werror -j"$(nproc)"` → **0 warnings**.
 2. `ctest --test-dir build-werror --output-on-failure` → all pass.
 3. `cmake -B build-san -DUMDPLAY_SANITIZE=ON && cmake --build build-san -j"$(nproc)"` + `LSAN_OPTIONS=suppressions=tests/lsan.supp ctest --test-dir build-san` → clean.

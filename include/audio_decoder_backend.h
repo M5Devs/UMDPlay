@@ -39,6 +39,7 @@ public:
     virtual void reset() = 0;
 
     virtual int sample_rate() const = 0;
+    virtual bool native() const = 0;    ///< built into the player
     virtual int channels() const = 0;
 };
 
@@ -47,5 +48,10 @@ public:
  * access unit). Requires no external libraries.
  */
 std::unique_ptr<AudioDecoderBackend> make_native_atrac3p_backend();
+
+#if defined(UMDPLAY_FFMPEG_BACKENDS)
+/// Optional libavcodec + libswresample backend, for A/B builds only.
+std::unique_ptr<AudioDecoderBackend> make_ffmpeg_atrac3p_backend();
+#endif
 
 }  // namespace umdplay

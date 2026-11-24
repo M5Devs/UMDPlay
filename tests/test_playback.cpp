@@ -50,7 +50,7 @@ struct DecodeStats { int video = 0; int audio = 0; size_t pcm = 0; int nonzero =
 
 DecodeStats decode_some(Decoder& d, int max_video) {
     DecodeStats s;
-    AVFrame* vf = av_frame_alloc();
+    umdplay::VideoFrame vf;
     std::vector<uint8_t> pcm;
     while (s.video < max_video) {
         pcm.clear();
@@ -64,7 +64,6 @@ DecodeStats decode_some(Decoder& d, int max_video) {
             for (uint8_t b : pcm) if (b != 0) { ++s.nonzero; break; }
         }
     }
-    av_frame_free(&vf);
     return s;
 }
 

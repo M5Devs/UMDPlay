@@ -33,9 +33,9 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
+          # No FFmpeg development packages: H.264 and ATRAC3+ are decoded by
+          # UMDPlay's own code (third_party/h264dec, src/atrac3p).
           sudo apt-get install -y cmake build-essential pkg-config \
-                                  libavformat-dev libavcodec-dev libavutil-dev \
-                                  libswscale-dev libswresample-dev libavfilter-dev \
                                   libsdl2-dev fonts-noto-cjk
 
       - name: Configure
@@ -251,7 +251,8 @@ jobs:
 
       - name: Configure
         run: |
-          export PKG_CONFIG_PATH="$(brew --prefix)/opt/ffmpeg/lib/pkgconfig:$(brew --prefix)/opt/sdl2/lib/pkgconfig"
+          # ffmpeg is installed only for the bundled CLI helper, never linked.
+          export PKG_CONFIG_PATH="$(brew --prefix)/opt/sdl2/lib/pkgconfig"
           cmake -B build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} -DUMDPLAY_WERROR=ON
 
       - name: Build
