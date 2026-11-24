@@ -32,21 +32,25 @@ Item {
     // Shown until the first picture arrives.
     Column {
         anchors.centerIn: parent
-        spacing: 10
+        spacing: 12
         visible: !video.hasFrame
-        opacity: 0.6
+        opacity: 0.7
 
-        Text {
+        Icon {
             anchors.horizontalCenter: parent.horizontalCenter
-            text: "\u25B6"
-            color: Theme.accent
-            font.pixelSize: 46
+            name: "disc"
+            size: 44
+            color: Theme.cyan
+            weight: 1.4
         }
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
             text: "DECODING"
-            color: Theme.textFaint
-            font: Theme.rowTitle
+            color: Theme.onSurfaceVariant
+            font.family: Theme.fontFamily
+            font.pixelSize: Theme.labelMd
+            font.weight: Font.DemiBold
+            font.letterSpacing: 3
         }
     }
 

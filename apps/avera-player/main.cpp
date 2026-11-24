@@ -15,6 +15,7 @@
 #include <QScreen>
 #include <QString>
 #include <QElapsedTimer>
+#include <QFileInfo>
 #include <QTimer>
 #include <QVariantList>
 #include <QVariantMap>
@@ -25,6 +26,7 @@
 #include <vector>
 
 #include "avera_ui/avera_ui.h"
+#include "avera_ui/art_provider.h"
 #include "avera_ui/audio_output.h"
 #include "avera_ui/hub.h"
 #include "avera_ui/player_controller.h"
@@ -33,14 +35,31 @@
 #include "decoder.h"
 #include "iso_reader.h"
 #include "param_sfo.h"
+#include "playlist_parser.h"
+#include "umdplay_logo.h"
 
 namespace {
 
-QString secondsText(double s) {
+/// "1.73 GB" / "544 MB" from a byte count.
+QString sizeText(qint64 bytes) {
+    const double gb = double(bytes) / (1024.0 * 1024.0 * 1024.0);
+    if (gb >= 1.0) return QStringLiteral("%1 GB").arg(gb, 0, 'f', 2);
+    const double mb = double(bytes) / (1024.0 * 1024.0);
+    return QStringLiteral("%1 MB").arg(mb, 0, 'f', 1);
+}
+
+QString clockText(double s) {
     if (s <= 0.0) return QStringLiteral("--:--");
     const int total = static_cast<int>(s + 0.5);
     return QStringLiteral("%1:%2").arg(total / 60, 2, 10, QChar('0'))
                                   .arg(total % 60, 2, 10, QChar('0'));
+}
+
+/// "UMD_VIDEO" -> "UMD-VIDEO-ROM", the medium name the shell reports.
+QString mediumName(const std::string& root) {
+    if (root == "UMD_AUDIO") return QStringLiteral("UMD-AUDIO-ROM");
+    if (root == "UMD_VIDEO") return QStringLiteral("UMD-VIDEO-ROM");
+    return QStringLiteral("UMD-ROM");
 }
 
 /// Bridges UMDPlay's Decoder to AveraUI. Decoding happens on the GUI thread,
@@ -48,16 +67,18 @@ QString secondsText(double s) {
 /// keeps the QML scene free of cross-thread plumbing.
 class UmdPlayerBackend : public avera::AveraPlayerBackend {
 public:
-    UmdPlayerBackend(std::string iso, MpsEntry entry, avera::AveraVideoItem* surface,
-                     avera::AveraAudioOutput* audio)
-        : m_iso(std::move(iso)), m_entry(std::move(entry)), m_surface(surface), m_audio(audio) {}
+    UmdPlayerBackend(std::string iso, MpsEntry entry, QString discTitle,
+                     avera::AveraVideoItem* surface, avera::AveraAudioOutput* audio)
+        : m_iso(std::move(iso)), m_entry(std::move(entry)), m_discTitle(std::move(discTitle)),
+          m_surface(surface), m_audio(audio) {}
 
     ~UmdPlayerBackend() override { close(); }
 
     bool open() {
         if (!m_decoder.open_stream(m_iso, m_entry)) return false;
         m_audio->start(44100, 2);
-        m_title = QString::fromStdString(m_entry.name);
+        // The shell shows the disc's own title, never the raw .MPS file name.
+        m_title = m_discTitle.isEmpty() ? QString::fromStdString(m_entry.name) : m_discTitle;
         m_duration = m_decoder.get_duration();
         return true;
     }
@@ -122,10 +143,14 @@ public:
     }
 
     int frames() const { return m_frames; }
+    int videoWidth() const { return m_decoder.video_width(); }
+    int videoHeight() const { return m_decoder.video_height(); }
+    double fps() const { return m_decoder.get_fps(); }
 
 private:
     std::string m_iso;
     MpsEntry m_entry;
+    QString m_discTitle;
     avera::AveraVideoItem* m_surface = nullptr;
     avera::AveraAudioOutput* m_audio = nullptr;
     Decoder m_decoder;
@@ -140,9 +165,21 @@ struct DiscInfo {
     std::string iso;
     std::string title;
     std::string disc_id;
+    std::string category;
+    std::string root_name;
+    qint64      bytes = 0;
     std::vector<MpsEntry> streams;
-    bool ok = false;
+    QByteArray  icon;            // ICON0.PNG (square, for small cards)
+    QByteArray  pic;             // PIC1.PNG  (16:9 splash, for the hero)
+    int         chapters = 0;
+    double      feature_seconds = 0.0;
+    std::string feature_track;   // playlist track name, e.g. "Feature"
+    bool        ok = false;
 };
+
+QByteArray toBytes(const std::vector<uint8_t>& v) {
+    return QByteArray(reinterpret_cast<const char*>(v.data()), int(v.size()));
+}
 
 DiscInfo probeDisc(const std::string& path) {
     DiscInfo d;
@@ -152,6 +189,28 @@ DiscInfo probeDisc(const std::string& path) {
     d.streams = iso.get_mps_entries();
     d.title = iso.param().title;
     d.disc_id = iso.param().disc_id;
+    d.category = iso.param().category;
+    d.root_name = iso.root_name();
+    d.bytes = QFileInfo(QString::fromStdString(path)).size();
+    d.icon = toBytes(iso.read_metadata("ICON0.PNG"));
+    d.pic = toBytes(iso.read_metadata("PIC1.PNG"));
+    if (d.pic.isEmpty()) d.pic = d.icon;
+
+    // Chapters come from the playlist's main track, which is the disc's own
+    // notion of the feature — never a hardcoded stream index.
+    if (const UmdAsset* playlist = iso.find_asset("PLAYLIST.UMD")) {
+        const auto raw = iso.read_asset(*playlist);
+        umdplay::Playlist parsed = umdplay::parse_playlist(raw.data(), raw.size());
+        if (parsed.valid) {
+            if (const auto* track = parsed.main_track()) {
+                const int track_index = int(track - parsed.tracks.data());
+                const auto chapters = parsed.chapters(track_index);
+                d.chapters = int(chapters.size());
+                d.feature_seconds = track->end_seconds - track->start_seconds;
+                d.feature_track = track->name;
+            }
+        }
+    }
     d.ok = !d.streams.empty();
     return d;
 }
@@ -204,78 +263,114 @@ int main(int argc, char** argv) {
     avera::AveraPlayerController player;
     avera::AveraAudioOutput audio;
 
-    // Hub: the disc, its streams, and the transport actions.
-    QVector<avera::AveraRow> rows;
-
-    avera::AveraRow discRow;
-    discRow.key = QStringLiteral("disc");
-    discRow.title = QStringLiteral("Disc");
-    avera::AveraCard feature;
-    feature.title = QString::fromStdString(disc.title.empty() ? disc.iso : disc.title);
-    feature.subtitle = QString::fromStdString(disc.disc_id);
-    feature.badge = QStringLiteral("UMD");
-    feature.data.insert(QStringLiteral("kind"), QStringLiteral("play"));
-    discRow.cards.push_back(feature);
-    rows.push_back(discRow);
-
-    avera::AveraRow streamRow;
-    streamRow.key = QStringLiteral("streams");
-    streamRow.title = QStringLiteral("Streams");
-    for (const auto& s : disc.streams) {
-        avera::AveraCard c;
-        c.title = QString::fromStdString(s.name);
-        c.subtitle = QStringLiteral("%1 MB").arg(s.size_bytes / (1024.0 * 1024.0), 0, 'f', 1);
-        c.badge = QStringLiteral("MPS");
-        c.data.insert(QStringLiteral("kind"), QStringLiteral("stream"));
-        c.data.insert(QStringLiteral("name"), QString::fromStdString(s.name));
-        streamRow.cards.push_back(c);
-    }
-    rows.push_back(streamRow);
-
-    avera::AveraRow actionRow;
-    actionRow.key = QStringLiteral("actions");
-    actionRow.title = QStringLiteral("Playback");
-    const struct { const char* title; const char* sub; const char* badge; } actions[] = {
-        {"Play feature", "Native H.264 + ATRAC3+", "PLAY"},
-        {"Restart", "Back to 00:00", "0:00"},
-        {"Skip forward", "+30 seconds", "+30"},
-    };
-    for (const auto& a : actions) {
-        avera::AveraCard c;
-        c.title = QString::fromLatin1(a.title);
-        c.subtitle = QString::fromLatin1(a.sub);
-        c.badge = QString::fromLatin1(a.badge);
-        c.data.insert(QStringLiteral("kind"), QStringLiteral("action"));
-        c.data.insert(QStringLiteral("action"), QString::fromLatin1(a.title));
-        actionRow.cards.push_back(c);
-    }
-    rows.push_back(actionRow);
-
-    hub.setRows(rows);
-
     const MpsEntry* featureEntry = featureStream(disc);
     if (!featureEntry) return 3;
 
-    auto* backend = new UmdPlayerBackend(disc.iso, *featureEntry, nullptr, &audio);
+    const QString discTitle = QString::fromStdString(
+        disc.title.empty() ? std::string("Unknown Disc") : disc.title);
+    auto* backend = new UmdPlayerBackend(disc.iso, *featureEntry, discTitle, nullptr, &audio);
     if (!backend->open()) {
         std::fprintf(stderr, "[-] could not open %s\n", featureEntry->name.c_str());
         return 4;
     }
     player.setBackend(backend);
 
-    QObject::connect(&hub, &avera::AveraHub::activated, &player,
-                     [&](const QString&, int, const QVariantMap& card) {
-                         const QString kind = card.value(QStringLiteral("kind")).toString();
-                         if (kind == QLatin1String("play")) player.play();
-                         else if (kind == QLatin1String("action")) {
-                             const QString a = card.value(QStringLiteral("action")).toString();
-                             if (a == QLatin1String("Play feature")) player.play();
-                             else if (a == QLatin1String("Restart")) player.seekTo(0.0);
-                             else if (a == QLatin1String("Skip forward")) player.skip(30.0);
-                         }
-                     });
+    // --- fill the hub from what the disc actually says ---------------------
+    const QString title = discTitle;
+    const QString medium = mediumName(disc.root_name);
+    const QString discSize = sizeText(disc.bytes);
+    const int videoW = backend->videoWidth();
+    const int videoH = backend->videoHeight();
+    const double fps = backend->fps();
+
+    // The feature's own clip entry, for its size and (fallback) duration.
+    const double featureSeconds = disc.feature_seconds > 0.0
+        ? disc.feature_seconds : backend->duration();
+
+    hub.setNavItems({QStringLiteral("Media Home"), QStringLiteral("Disc Library"),
+                     QStringLiteral("Chapters"), QStringLiteral("Browse")});
+    hub.setStatus(QStringLiteral("DRIVE 1 [ISO]"), medium, discSize,
+                  QStringLiteral("READY"),
+                  QStringLiteral("H.264 + ATRAC3+"),
+                  QStringLiteral("NATIVE / ZERO-FFMPEG"));
+
+    QVector<avera::AveraCategory> categories;
+    categories.push_back({QStringLiteral("Now Playing"),
+                          backend->playing() ? QStringLiteral("On the transport")
+                                             : QStringLiteral("Idle · ready to play")});
+    categories.push_back({QStringLiteral("Recent Discs"),
+                          QStringLiteral("1 disc loaded \u00b7 cached ISO")});
+    categories.push_back({QStringLiteral("Chapters"),
+                          disc.chapters > 0
+                              ? QStringLiteral("%1 markers").arg(disc.chapters)
+                              : QStringLiteral("No markers on this disc")});
+    categories.push_back({QStringLiteral("Browse"),
+                          QStringLiteral("%1 titles on the disc").arg(int(disc.streams.size()))});
+    categories.push_back({QStringLiteral("Settings"),
+                          QStringLiteral("Native core · no FFmpeg")});
+    hub.setCategories(categories);
+    hub.setCurrentCategory(1);
+
+    avera::AveraHero hero;
+    hero.artUrl = QStringLiteral("image://discart/hero");
+    hero.title = title;
+    hero.meta = QStringLiteral("%1 chapters \u00b7 %2 \u00b7 %3")
+                    .arg(disc.chapters)
+                    .arg(clockText(featureSeconds))
+                    .arg(sizeText(qint64(featureEntry->size_bytes)));
+    QVariantList badges;
+    badges.push_back(QVariantMap{{QStringLiteral("text"),
+                                  QStringLiteral("%1x%2").arg(videoW).arg(videoH)},
+                                 {QStringLiteral("strong"), true}});
+    badges.push_back(QVariantMap{{QStringLiteral("text"), QStringLiteral("H.264")},
+                                 {QStringLiteral("strong"), false}});
+    badges.push_back(QVariantMap{{QStringLiteral("text"), QStringLiteral("ATRAC3+")},
+                                 {QStringLiteral("strong"), false}});
+    if (fps > 0.0)
+        badges.push_back(QVariantMap{{QStringLiteral("text"),
+                                      QStringLiteral("%1 fps").arg(fps, 0, 'f', 2)},
+                                     {QStringLiteral("strong"), false}});
+    hero.badges = badges;
+    hub.setHero(hero);
+
+    // Peek card: the disc's next title (the menu clip, when it has one).
+    const MpsEntry* menuEntry = nullptr;
+    for (const auto& stream : disc.streams) {
+        if (&stream != featureEntry && (!menuEntry || stream.size_bytes > menuEntry->size_bytes))
+            menuEntry = &stream;
+    }
+    avera::AveraPeek peek;
+    peek.artUrl = QStringLiteral("image://discart/icon");
+    peek.title = QStringLiteral("Disc Menu");
+    peek.meta = menuEntry
+        ? QStringLiteral("MENU \u00b7 %1").arg(sizeText(qint64(menuEntry->size_bytes)))
+        : QStringLiteral("NO MENU STREAM");
+    peek.kind = QStringLiteral("UMD MENU");
+    peek.slot = menuEntry
+        ? QStringLiteral("TITLE 02 \u00b7 %1").arg(sizeText(qint64(menuEntry->size_bytes)))
+        : QStringLiteral("TITLE 02 \u00b7 MISSING");
+    peek.cta = QStringLiteral("Open Menu");
+    hub.setPeek(peek);
+
+    hub.setChapterPillText(disc.chapters > 0
+                               ? QStringLiteral("%1 Chapters").arg(disc.chapters)
+                               : QStringLiteral("Chapters"));
+    hub.setNowPlaying(QStringLiteral("Ready"),
+                      QStringLiteral("%1 \u00b7 %2").arg(medium, discSize));
+
+    // Cover art is served from memory: the disc's own ICON0/PIC1 plus the
+    // embedded UMDPlay mark, with no temporary files on disk.
+    auto* art = new avera::ArtProvider;
+    art->insert(QStringLiteral("hero"), disc.pic);
+    art->insert(QStringLiteral("icon"), disc.icon.isEmpty() ? disc.pic : disc.icon);
+    art->insert(QStringLiteral("logo"),
+                QByteArray(reinterpret_cast<const char*>(umdplay_logo_png),
+                           int(umdplay_logo_png_len)));
+
+    avera::loadFonts();
 
     QQmlApplicationEngine engine;
+    engine.addImageProvider(QStringLiteral("discart"), art);
     engine.rootContext()->setContextProperty(QStringLiteral("hubModel"), &hub);
     engine.rootContext()->setContextProperty(QStringLiteral("playerCtl"), &player);
     engine.load(QUrl(QStringLiteral("qrc:/avera/app/Main.qml")));
@@ -304,13 +399,17 @@ int main(int argc, char** argv) {
 
     if (!shotPath.isEmpty()) {
         QTimer::singleShot(shotDelay, [&]() {
-            const QImage shot = window->grabWindow();
-            if (!shot.isNull() && shot.save(shotPath))
-                std::printf("[+] wrote %s (%dx%d)\n", qPrintable(shotPath),
-                            shot.width(), shot.height());
-            else
-                std::fprintf(stderr, "[-] could not grab the window\n");
-            app.quit();
+            // Show the transport chrome so the grab captures the full shell.
+            player.pokeOsd();
+            QTimer::singleShot(350, [&]() {
+                const QImage shot = window->grabWindow();
+                if (!shot.isNull() && shot.save(shotPath))
+                    std::printf("[+] wrote %s (%dx%d)\n", qPrintable(shotPath),
+                                shot.width(), shot.height());
+                else
+                    std::fprintf(stderr, "[-] could not grab the window\n");
+                app.quit();
+            });
         });
     }
 

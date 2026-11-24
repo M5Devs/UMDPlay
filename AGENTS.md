@@ -71,8 +71,8 @@ apps/avera-player/      Qt front end: binds Decoder to AveraUI and h264dec (H.26
 | **clip_export** | `include/clip_export.h`, `src/clip_export.cpp` | Headless decode → MP4 (shells out to the `ffmpeg` CLI for H.264/AAC muxing). |
 | **gesture** / **aspect** / **recent** | matching headers | Touch/mouse gesture recognition, zoom/aspect modes, recent-disc persistence. |
 | **atrac3p_decoder** | `include/atrac3p_decoder.h`, `src/atrac3p_decoder.cpp`, `src/atrac3p/` | Native, FFmpeg-free ATRAC3+ decoder: bitstream parser, IMDCT + windowing, gain compensation, GHA tone synthesis, power compensation and the IPQF synthesis bank. Ported from FFmpeg's atrac3plus (LGPL-2.1+, see `NOTICE`). `include/audio_decoder_backend.h` is the `AudioDecoderBackend` seam `Decoder` drives; `make_native_atrac3p_backend()` is the default implementation. |
-| **avera_ui** | `libs/avera-ui/include/avera_ui/*`, `src/*`, `qml/AveraUI/*` | Reusable Qt 6 Quick shell. `AveraHub` (2-D card carousel model), `AveraPlayerController` (transport state + OSD timers over a host `AveraPlayerBackend`), `AveraVideoItem` (`VideoSurface`: YUV→RGB + `QSGSimpleTextureNode`), `AveraAudioOutput` (S16 stereo ring → `QAudioSink`), `AveraSfx` (procedural chimes). QML ships in the library's own resource at `:/avera/qml/AveraUI`. |
-| **avera-player** | `apps/avera-player/main.cpp`, `Main.qml` | The Qt front end: probes the disc, fills a hub, pumps the decoder at ~60 Hz and pushes frames/PCM into the AveraUI items. |
+| **avera_ui** | `libs/avera-ui/include/avera_ui/*`, `src/*`, `qml/AveraUI/*` | Reusable Qt 6 Quick shell. `AveraHub` (media-center state: nav, disc telemetry, rail categories, hero/peek cards, action focus), `AveraPlayerController` (transport state + OSD timers over a host `AveraPlayerBackend`), `AveraVideoItem` (`VideoSurface`: YUV→RGB + `QSGSimpleTextureNode`), `AveraAudioOutput` (S16 stereo ring → `QAudioSink`), `AveraSfx` (procedural chimes), `ArtProvider` (in-memory PNG cover art for QML `image://discart/<id>`). QML ships in the library's resource at `:/avera/qml/AveraUI`; the Plus Jakarta Sans faces ship at `:/avera/fonts` and are registered by `avera::loadFonts()`. |
+| **avera-player** | `apps/avera-player/main.cpp`, `Main.qml` | The Qt front end: probes the disc (PARAM.SFO title, PLAYLIST.UMD chapters, ICON0/PIC1 art, ISO size), fills the hub, pumps the decoder at ~60 Hz and pushes frames/PCM into the AveraUI items. |
 | **logo (embedded)** | `include/umdplay_logo.h`, generated `umdplay_logo_data.cpp` | `assets/umdplay_logo.png` baked into the binary by `cmake/EmbedAsset.cmake`; drawn as the WMC hub header mark and set as the SDL window icon. |
 
 `main.cpp` wires them together: parse args → open disc → build hub state →
@@ -132,6 +132,14 @@ DISPLAY=:99 ffmpeg -f x11grab -framerate 30 -video_size 1280x720 -i :99 -t 18 \
     -c:v libx264 -pix_fmt yuv420p out.mp4
 ```
 
+The shell's look is transcribed from the Stitch "Aero Oceanic Media Center"
+export (`DESIGN.md` tokens → `qml/AveraUI/Theme.qml`). Structure:
+`HubView` = `TopBar` + `StatusStrip` + (`CategoryRail` | `HeroCard` + `PeekCard`
++ `ActionPill`s) + one WMC bottom row (`MiniPlayer` + `TransportPill`), over an
+`AuroraBackground` Canvas. Icons are Canvas paths (`Icon.qml`), so no icon font
+is needed. Every string is real disc data — never a `.MPS` file name, never a
+mock title.
+
 `QQuickWindow::grabWindow()` is **not** usable for frame-by-frame capture while
 video is playing: each grab paints a fresh node tree, and a node created inside
 the grab cannot own a texture across grabs (black frames, then a crash if you
@@ -140,6 +148,11 @@ force it). Use X11 capture, or `--screenshot` for single stills.
 ### Headless UI / screenshots
 
 ```bash
+# Qt shell: offscreen stills (hub, or the player with its OSD poked on)
+QT_QPA_PLATFORM=offscreen ./build-qt/bin/avera-player disc.iso --screenshot hub.png
+QT_QPA_PLATFORM=offscreen ./build-qt/bin/avera-player disc.iso --play-after 300 \
+    --screenshot player.png --shot-delay 5000
+
 # SDL dummy driver + Xvfb: render the hub, player OSD or a disc menu to a PNG
 SDL_AUDIODRIVER=dummy xvfb-run -a -s "-screen 0 1280x720x24" \
     ./build/bin/umdplay disc.iso --screenshot out.png

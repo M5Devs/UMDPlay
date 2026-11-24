@@ -2,133 +2,101 @@
 
 #include "avera_ui/hub.h"
 
-#include <QVariantMap>
+#include <algorithm>
 
 namespace avera {
 
-namespace {
-
-QVariantMap card_to_map(const AveraCard& c, int row, int index) {
-    QVariantMap m;
-    m.insert(QStringLiteral("title"), c.title);
-    m.insert(QStringLiteral("subtitle"), c.subtitle);
-    m.insert(QStringLiteral("icon"), c.icon);
-    m.insert(QStringLiteral("badge"), c.badge);
-    m.insert(QStringLiteral("playable"), c.playable);
-    m.insert(QStringLiteral("row"), row);
-    m.insert(QStringLiteral("index"), index);
-    m.insert(QStringLiteral("data"), c.data);
-    return m;
-}
-
-}  // namespace
-
 AveraHub::AveraHub(QObject* parent) : QObject(parent) {}
 
-void AveraHub::setRows(QVector<AveraRow> rows) {
-    m_rows.clear();
-    for (int r = 0; r < rows.size(); ++r) {
-        QVariantMap row;
-        row.insert(QStringLiteral("key"), rows[r].key);
-        row.insert(QStringLiteral("title"), rows[r].title);
-        QVariantList cards;
-        for (int c = 0; c < rows[r].cards.size(); ++c)
-            cards.append(card_to_map(rows[r].cards[c], r, c));
-        row.insert(QStringLiteral("cards"), cards);
-        m_rows.append(row);
+void AveraHub::setNavItems(const QStringList& items) {
+    if (m_navItems == items) return;
+    m_navItems = items;
+    emit infoChanged();
+}
+
+void AveraHub::setStatus(const QString& drive, const QString& medium, const QString& size,
+                         const QString& state, const QString& codec, const QString& engine) {
+    m_drive = drive;
+    m_medium = medium;
+    m_size = size;
+    m_state = state;
+    m_codec = codec;
+    m_engine = engine;
+    emit infoChanged();
+}
+
+void AveraHub::setCategories(const QVector<AveraCategory>& categories) {
+    m_categories.clear();
+    m_categories.reserve(categories.size());
+    for (const auto& c : categories) {
+        QVariantMap map;
+        map.insert(QStringLiteral("title"), c.title);
+        map.insert(QStringLiteral("sub"), c.sub);
+        m_categories.push_back(map);
     }
-    m_row = 0;
-    m_index = 0;
-    clamp();
-    emit rowsChanged();
+    m_category = std::clamp(m_category, 0, std::max(0, int(m_categories.size()) - 1));
+    emit infoChanged();
     emit selectionChanged();
 }
 
-bool AveraHub::valid() const {
-    return m_row >= 0 && m_row < m_rows.size();
+void AveraHub::setHero(const AveraHero& hero) {
+    m_hero = hero;
+    emit infoChanged();
 }
 
-void AveraHub::clamp() {
-    if (m_rows.isEmpty()) { m_row = m_index = 0; return; }
-    m_row = qBound(0, m_row, int(m_rows.size()) - 1);
-    const QVariantMap row = m_rows.at(m_row).toMap();
-    const QVariantList cards = row.value(QStringLiteral("cards")).toList();
-    m_index = cards.isEmpty() ? 0 : qBound(0, m_index, int(cards.size()) - 1);
+void AveraHub::setPeek(const AveraPeek& peek) {
+    m_peek = peek;
+    emit infoChanged();
 }
 
-QString AveraHub::currentRowKey() const {
-    if (!valid()) return {};
-    return m_rows.at(m_row).toMap().value(QStringLiteral("key")).toString();
+void AveraHub::setChapterPillText(const QString& text) {
+    m_chapterPill = text;
+    emit infoChanged();
 }
 
-QVariantMap AveraHub::currentCard() const {
-    if (!valid()) return {};
-    const QVariantList cards =
-        m_rows.at(m_row).toMap().value(QStringLiteral("cards")).toList();
-    if (m_index < 0 || m_index >= cards.size()) return {};
-    return cards.at(m_index).toMap();
+void AveraHub::setNowPlaying(const QString& stateText, const QString& detail) {
+    m_nowState = stateText;
+    m_nowDetail = detail;
+    emit infoChanged();
 }
 
-QString AveraHub::currentTitle() const {
-    return currentCard().value(QStringLiteral("title")).toString();
+void AveraHub::setActiveNav(int index) {
+    const int clamped = std::max(0, index);
+    if (clamped == m_activeNav) return;
+    m_activeNav = clamped;
+    emit selectionChanged();
 }
 
-QString AveraHub::currentSubtitle() const {
-    return currentCard().value(QStringLiteral("subtitle")).toString();
+void AveraHub::setCurrentCategory(int index) {
+    if (m_categories.isEmpty()) return;
+    const int clamped = std::clamp(index, 0, int(m_categories.size()) - 1);
+    if (clamped == m_category) return;
+    m_category = clamped;
+    emit selectionChanged();
 }
 
-bool AveraHub::currentPlayable() const {
-    return currentCard().value(QStringLiteral("playable")).toBool();
+void AveraHub::setFocusIndex(int index) {
+    const int clamped = std::clamp(index, 0, 3);
+    if (clamped == m_focus) return;
+    m_focus = clamped;
+    emit selectionChanged();
 }
 
-bool AveraHub::move(int dx, int dy) {
-    if (m_rows.isEmpty()) return false;
-    const int oldRow = m_row;
-    const int oldIndex = m_index;
-
-    if (dy != 0) {
-        m_row += dy;
-        // Wrap around the vertical categories for a continuous carousel feel.
-        if (m_row < 0) m_row = int(m_rows.size()) - 1;
-        if (m_row >= m_rows.size()) m_row = 0;
-        m_index = 0;
-    }
-    if (dx != 0) {
-        const QVariantList cards =
-            m_rows.at(m_row).toMap().value(QStringLiteral("cards")).toList();
-        if (!cards.isEmpty()) {
-            m_index += dx;
-            if (m_index < 0) m_index = int(cards.size()) - 1;
-            if (m_index >= cards.size()) m_index = 0;
-        }
-    }
-    if (m_row == oldRow && m_index == oldIndex) return false;
+bool AveraHub::moveFocus(int dx) {
+    const int next = std::clamp(m_focus + dx, 0, 3);
+    if (next == m_focus) return false;
+    m_focus = next;
     emit selectionChanged();
     return true;
 }
 
-bool AveraHub::setSelection(int row, int index) {
-    if (row < 0 || row >= m_rows.size()) return false;
-    if (row == m_row && index == m_index) return false;
-    m_row = row;
-    m_index = index;
-    clamp();
+bool AveraHub::moveCategory(int dy) {
+    if (m_categories.isEmpty()) return false;
+    const int next = std::clamp(m_category + dy, 0, int(m_categories.size()) - 1);
+    if (next == m_category) return false;
+    m_category = next;
     emit selectionChanged();
     return true;
-}
-
-void AveraHub::activateCurrent() { activate(m_row, m_index); }
-
-void AveraHub::activate(int row, int index) {
-    if (row < 0 || row >= m_rows.size()) return;
-    const QVariantMap r = m_rows.at(row).toMap();
-    const QVariantList cards = r.value(QStringLiteral("cards")).toList();
-    if (index < 0 || index >= cards.size()) return;
-    m_row = row;
-    m_index = index;
-    emit selectionChanged();
-    emit activated(r.value(QStringLiteral("key")).toString(), index,
-                   cards.at(index).toMap());
 }
 
 }  // namespace avera

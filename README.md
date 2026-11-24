@@ -35,7 +35,7 @@ firmware, no emulator, no extraction.**
 | **Avera UI** hub (Qt 6 Quick) | **Avera UI** player — real disc |
 |:---:|:---:|
 | ![Avera hub](screenshots/avera-hub.png) | ![Avera player](screenshots/avera-player.png) |
-| The reusable `libs/avera-ui` shell: disc, stream and action rows | 480i decoded by the native core, letterboxed at 4:3 by the QML surface |
+| The reusable `libs/avera-ui` shell: Aero-glass header, disc telemetry strip, category rail, hero card built from the disc's own `PIC1.PNG`, action pills and the single WMC transport row | 480i decoded by the native core, letterboxed to the coded shape by the QML surface |
 
 > The first four shots are rendered headlessly (`SDL_VIDEODRIVER=dummy`) from a
 > real Region-2 UMD-Video disc (*Miku no Hi 39's Giving Day*); the Avera shots

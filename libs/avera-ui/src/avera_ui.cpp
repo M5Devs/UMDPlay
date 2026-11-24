@@ -8,11 +8,25 @@
 #include "avera_ui/ui_sfx.h"
 #include "avera_ui/video_item.h"
 
+#include <QFontDatabase>
 #include <QQmlEngine>
 
 namespace avera {
 
 QString version() { return QStringLiteral("1.0.0"); }
+
+void loadFonts() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    static const char* const faces[] = {
+        ":/avera/fonts/assets/fonts/PlusJakartaSans-Regular.ttf",
+        ":/avera/fonts/assets/fonts/PlusJakartaSans-Medium.ttf",
+        ":/avera/fonts/assets/fonts/PlusJakartaSans-SemiBold.ttf",
+        ":/avera/fonts/assets/fonts/PlusJakartaSans-Bold.ttf",
+    };
+    for (const char* face : faces) QFontDatabase::addApplicationFont(QString::fromLatin1(face));
+}
 
 void registerTypes() {
     static bool done = false;

@@ -7,7 +7,7 @@ Window {
     id: root
     width: 1280
     height: 720
-    color: Theme.bg
+    color: Theme.canvas
     title: "Avera Player"
     visible: true
 
@@ -19,29 +19,34 @@ Window {
         anchors.fill: parent
         focus: true
 
-        Keys.onPressed: function(ev) {
+        Keys.onPressed: function (ev) {
             if (root.mode === "hub") {
-                if (ev.key === Qt.Key_Left)  { hubModel.move(-1, 0); ev.accepted = true }
-                else if (ev.key === Qt.Key_Right) { hubModel.move(1, 0); ev.accepted = true }
-                else if (ev.key === Qt.Key_Up)    { hubModel.move(0, -1); ev.accepted = true }
-                else if (ev.key === Qt.Key_Down)  { hubModel.move(0, 1); ev.accepted = true }
+                if (ev.key === Qt.Key_Left) { hubModel.moveFocus(-1); ev.accepted = true }
+                else if (ev.key === Qt.Key_Right) { hubModel.moveFocus(1); ev.accepted = true }
+                else if (ev.key === Qt.Key_Up) { hubModel.moveCategory(-1); ev.accepted = true }
+                else if (ev.key === Qt.Key_Down) { hubModel.moveCategory(1); ev.accepted = true }
                 else if (ev.key === Qt.Key_Return || ev.key === Qt.Key_Enter) {
-                    hubModel.activateCurrent(); ev.accepted = true
-                }
+                    activateFocus(); ev.accepted = true
+                } else if (ev.key === Qt.Key_Space) { playDisc(); ev.accepted = true }
             } else {
                 if (ev.key === Qt.Key_Space) { playerCtl.togglePlay(); ev.accepted = true }
-                else if (ev.key === Qt.Key_Left)  { playerCtl.skip(-10); ev.accepted = true }
+                else if (ev.key === Qt.Key_Left) { playerCtl.skip(-10); ev.accepted = true }
                 else if (ev.key === Qt.Key_Right) { playerCtl.skip(10); ev.accepted = true }
                 else if (ev.key === Qt.Key_Escape) { root.mode = "hub"; ev.accepted = true }
             }
         }
 
-        // Backdrop
-        Rectangle {
-            anchors.fill: parent
-            gradient: Gradient {
-                GradientStop { position: 0.0; color: Theme.bgTop }
-                GradientStop { position: 1.0; color: Theme.bgBottom }
+        function playDisc() {
+            playerCtl.play();
+            root.mode = "player";
+        }
+
+        function activateFocus() {
+            switch (hubModel.focusIndex) {
+            case 0: playDisc(); break;
+            case 1: playerCtl.pokeOsd(); root.mode = "player"; break;
+            case 2: hubModel.currentCategory = 2; break;
+            default: hubModel.currentCategory = 4; break;
             }
         }
 
@@ -51,52 +56,17 @@ Window {
             anchors.fill: parent
             visible: root.mode === "hub"
             opacity: visible ? 1.0 : 0.0
-            Behavior on opacity { NumberAnimation { duration: 180 } }
-
-            Column {
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.topMargin: 56
-                anchors.leftMargin: Theme.gutter
-                spacing: 6
-
-                Text {
-                    text: "AVERA"
-                    color: Theme.accent
-                    font: Qt.font({ pixelSize: 17, weight: Font.DemiBold,
-                                    letterSpacing: 8, capitalization: Font.AllUppercase })
-                }
-                Text {
-                    text: hubModel.currentTitle.length > 0 ? hubModel.currentTitle : "UMD Video"
-                    color: Theme.text
-                    font: Theme.display
-                }
-                Text {
-                    text: hubModel.currentSubtitle
-                    color: Theme.textDim
-                    font: Theme.cardTitle
-                    visible: text.length > 0
-                }
-            }
+            Behavior on opacity { NumberAnimation { duration: 220 } }
 
             HubView {
-                id: hubView
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.bottom: parent.bottom
-                anchors.topMargin: 180
+                anchors.fill: parent
                 hub: hubModel
-            }
-
-            Text {
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                anchors.margins: 22
-                text: "← → move   ↑ ↓ row   Enter select"
-                color: Theme.textFaint
-                font: Theme.mono
+                player: playerCtl
+                logoSource: "image://discart/logo"
+                onPlayRequested: scope.playDisc()
+                onDiscMenuRequested: { playerCtl.pokeOsd(); root.mode = "player" }
+                onChaptersRequested: hubModel.currentCategory = 2
+                onOptionsRequested: hubModel.currentCategory = 4
             }
         }
 
@@ -109,6 +79,8 @@ Window {
         }
     }
 
+    // Playback starting from anywhere (transport pill, remote, --play-after)
+    // moves the shell to the player page.
     Connections {
         target: playerCtl
         function onStateChanged() {

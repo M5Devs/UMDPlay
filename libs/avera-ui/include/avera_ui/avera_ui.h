@@ -20,4 +20,8 @@ QString version();
 /// Call once, before loading any QML that uses them.
 void registerTypes();
 
+/// Register the fonts bundled with the library (Plus Jakarta Sans). Call once,
+/// after the QGuiApplication exists and before loading QML.
+void loadFonts();
+
 }  // namespace avera

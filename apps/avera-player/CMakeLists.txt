@@ -6,6 +6,7 @@ add_executable(avera-player main.cpp)
 
 target_link_libraries(avera-player PRIVATE
     umdplay_core
+    umdplay_logo
     avera_ui
     Qt6::Core Qt6::Gui Qt6::Quick Qt6::Qml Qt6::Multimedia)
 

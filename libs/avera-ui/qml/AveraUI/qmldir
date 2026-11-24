@@ -1,5 +1,16 @@
 singleton Theme 1.0 Theme.qml
-Card 1.0 Card.qml
+Icon 1.0 Icon.qml
+Badge 1.0 Badge.qml
+GlassPanel 1.0 GlassPanel.qml
+AuroraBackground 1.0 AuroraBackground.qml
+TopBar 1.0 TopBar.qml
+StatusStrip 1.0 StatusStrip.qml
+CategoryRail 1.0 CategoryRail.qml
+HeroCard 1.0 HeroCard.qml
+PeekCard 1.0 PeekCard.qml
+ActionPill 1.0 ActionPill.qml
+MiniPlayer 1.0 MiniPlayer.qml
+TransportPill 1.0 TransportPill.qml
 HubView 1.0 HubView.qml
 PlayerView 1.0 PlayerView.qml
 TransportOsd 1.0 TransportOsd.qml
