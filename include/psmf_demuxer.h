@@ -145,6 +145,12 @@ private:
     // is needed / nothing is buffered.
     bool emit_audio_frame(PsmfPacket& out);
 
+    // Cut one access unit out of m_video_buf. PSMF splits an AU across several
+    // PES packets, so the boundary is an AUD NAL (00 00 01 09), not a packet
+    // edge. Returns false when the next boundary is not buffered yet (and not
+    // at EOF).
+    bool emit_video_au(PsmfPacket& out, bool at_eof);
+
     // Ensure at least `need` bytes are available at m_scan, reading more if
     // possible. Returns the bytes available (may be < need at EOF).
     size_t fill(size_t need);
@@ -172,6 +178,23 @@ private:
     uint64_t m_buf_off = 0;   // absolute stream offset of m_buf[0]
     size_t   m_scan = 0;      // parse cursor inside m_buf (a packet boundary)
     bool     m_eof = false;
+
+    // Concatenated 0xE0 payloads awaiting access-unit splitting. `m_video_marks`
+    // pairs each contributing PES's buffer offset with its PTS so a cut keeps
+    // the timestamp of the packet that opened the AU.
+    std::vector<uint8_t> m_video_buf;
+    struct VideoMark {
+        size_t  off;
+        int64_t pts;
+    };
+    std::vector<VideoMark> m_video_marks;
+    size_t m_video_scan = 1;  // skip the AUD at offset 0 of the pending AU
+
+    // How video access units are delimited. UMD discs start every AU with an
+    // AUD NAL and spread it over several PES packets; simpler streams keep one
+    // AU per PES packet. Decided from the first 64 KiB of video data.
+    enum class VideoFraming { Unknown, Aud, Pes };
+    VideoFraming m_video_framing = VideoFraming::Unknown;
 
     // Concatenated 0xBD payloads awaiting ATRAC3+ frame splitting (frames span
     // PES boundaries).

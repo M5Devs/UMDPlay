@@ -86,6 +86,30 @@ bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
 
     if (!m_video_backend && !m_audio_backend) return false;
     m_psmf_next_pts = umdplay::PSMF_NOPTS;
+
+    // A backend may only learn the picture geometry from a decoded frame
+    // (libavcodec parses the SPS on the first slice, not at open). Decode one
+    // now and stash it, so callers can size a window or an encoder header
+    // before the first read_frame(). Nothing is consumed: the frame is handed
+    // back in order, and audio walked past is pushed back onto the PCM queue
+    // (m_pcm_pos is still 0 here, so the front insert preserves ordering).
+    if (m_video_backend && m_video_backend->width() <= 0) {
+        umdplay::VideoFrame first;
+        std::vector<uint8_t> pcm;
+        for (int guard = 0; guard < 240 && !first.valid(); ++guard) {
+            const FrameType t = read_frame(first, pcm);
+            if (t == FrameType::Eof) break;
+            if (!pcm.empty()) {
+                m_pcm_ready.insert(m_pcm_ready.begin(), pcm.begin(), pcm.end());
+                m_pcm_pos = 0;
+                pcm.clear();
+            }
+        }
+        if (first.valid()) {
+            m_stashed_video = std::move(first);
+            m_video_pending = true;
+        }
+    }
     return true;
 }
 

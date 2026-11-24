@@ -1,6 +1,7 @@
 #include "psmf_demuxer.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <map>
 
@@ -167,6 +168,10 @@ void PsmfDemuxer::rewind_to(uint64_t off) {
     m_audio_buf.clear();
     m_audio_pos = 0;
     m_audio_pts = PSMF_NOPTS;
+    m_video_buf.clear();
+    m_video_marks.clear();
+    m_video_scan = 1;
+    m_video_framing = VideoFraming::Unknown;
 }
 
 size_t PsmfDemuxer::read_at(uint64_t off, uint8_t* dst, size_t len) const {
@@ -252,6 +257,11 @@ bool PsmfDemuxer::next_pes(PesView& v) {
         }
 
         const uint8_t* d = m_buf.data() + m_scan;
+        if (getenv("UMDPLAY_DEBUG_PES")) {
+            std::fprintf(stderr, "[pes] sid=%02x plen=%u total=%zu raw:", sid, plen, total);
+            for (size_t i = 0; i < 24 && i < total; ++i) std::fprintf(stderr, " %02x", d[i]);
+            std::fprintf(stderr, "\n");
+        }
         const uint8_t flags = d[7];
         const size_t hdr_len = d[8];
 
@@ -322,7 +332,12 @@ PsmfDemuxer::Step PsmfDemuxer::parse_next(PsmfPacket& out) {
 
     while (true) {
         PesView v;
-        if (!next_pes(v)) return Step::Eof;
+        if (!next_pes(v)) {
+            // Flush the AU the stream ends on; PSMF never pads the last one
+            // with a following AUD.
+            if (emit_video_au(out, true)) return Step::Video;
+            return Step::Eof;
+        }
 
         // PTS filter armed by a seek: drop packets that precede the target.
         if (m_seeking) {
@@ -332,15 +347,27 @@ PsmfDemuxer::Step PsmfDemuxer::parse_next(PsmfPacket& out) {
         }
 
         if (v.sid >= 0xE0 && v.sid <= 0xEF) {
-            out.kind = PsmfPacket::Kind::Video;
-            out.pts = v.pts;
-            out.dts = v.dts;
-            out.data.assign(m_buf.begin() + static_cast<std::ptrdiff_t>(v.payload_off),
-                            m_buf.begin() + static_cast<std::ptrdiff_t>(v.payload_off + v.payload_len));
-            out.keyframe = payload_is_keyframe(out.data.data(), out.data.size());
-            m_info.has_video = true;
-            if (v.pts != PSMF_NOPTS) m_position = static_cast<double>(v.pts) / 90000.0;
-            return Step::Video;
+            // One AU spans several PES packets (the container cuts at sector
+            // boundaries, not at NAL edges), so accumulate and only emit when
+            // the next AUD is in the buffer.
+            const uint8_t* pl = m_buf.data() + v.payload_off;
+            const bool starts_sc = v.payload_len >= 3 &&
+                                   ((pl[0] == 0 && pl[1] == 0 && pl[2] == 1) ||
+                                    (v.payload_len >= 4 && pl[0] == 0 && pl[1] == 0 &&
+                                     pl[2] == 0 && pl[3] == 1));
+            const bool starts_aud = starts_sc && v.payload_len >= 5 && pl[4] == 0x09;
+            if (m_video_framing == VideoFraming::Unknown) {
+                // A UMD disc opens every AU with an AUD; anything else keeps
+                // the one-PES-per-AU framing this demuxer started with.
+                m_video_framing = starts_aud ? VideoFraming::Aud : VideoFraming::Pes;
+            } else if (m_video_framing == VideoFraming::Pes && !starts_sc) {
+                // A payload that continues a NAL proves AUs span packets.
+                m_video_framing = VideoFraming::Aud;
+            }
+            m_video_marks.push_back({m_video_buf.size(), v.pts});
+            m_video_buf.insert(m_video_buf.end(), pl, pl + v.payload_len);
+            if (emit_video_au(out, false)) return Step::Video;
+            continue;
         }
 
         // 0xBD: append the payload to the audio buffer (frames span packets).
@@ -358,6 +385,73 @@ PsmfDemuxer::Step PsmfDemuxer::parse_next(PsmfPacket& out) {
         }
     }
 }
+
+namespace {
+// Offset of the next Annex-B AUD (00 00 01 09) at or after `from`, or `npos`.
+// Offset just past the start code and NAL header of an AUD at the buffer start,
+// so the AU's own AUD is never mistaken for the next boundary.
+size_t aud_header_end(const std::vector<uint8_t>& b) {
+    if (b.size() >= 5 && b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 1 && b[4] == 0x09) return 5;
+    if (b.size() >= 4 && b[0] == 0 && b[1] == 0 && b[2] == 1 && b[3] == 0x09) return 4;
+    return 1;
+}
+
+size_t find_aud(const std::vector<uint8_t>& buf, size_t from) {
+    const size_t n = buf.size();
+    for (size_t i = from; i + 4 <= n; ++i) {
+        if (buf[i] != 0 || buf[i + 1] != 0) continue;
+        if (buf[i + 2] == 1 && buf[i + 3] == 0x09) return i;
+        if (i + 5 <= n && buf[i + 2] == 0 && buf[i + 3] == 1 && buf[i + 4] == 0x09) return i;
+    }
+    return static_cast<size_t>(-1);
+}
+}  // namespace
+
+bool PsmfDemuxer::emit_video_au(PsmfPacket& out, bool at_eof) {
+    if (m_video_buf.empty()) return false;
+
+    size_t cut;
+    if (m_video_framing != VideoFraming::Aud) {
+        cut = m_video_buf.size();
+    } else {
+        const size_t from = std::max(m_video_scan, aud_header_end(m_video_buf));
+        cut = find_aud(m_video_buf, from);
+        if (cut == static_cast<size_t>(-1)) {
+            if (!at_eof) {
+                // Keep a 5-byte tail so a start code straddling the read
+                // boundary is still found on the next pass.
+                m_video_scan = m_video_buf.size() > 5 ? m_video_buf.size() - 5 : from;
+                return false;
+            }
+            cut = m_video_buf.size();
+        }
+    }
+
+    int64_t pts = PSMF_NOPTS;
+    for (const VideoMark& m : m_video_marks) {
+        if (m.off < cut && m.pts != PSMF_NOPTS) {
+            pts = m.pts;
+            break;
+        }
+    }
+
+    out = PsmfPacket{};
+    out.kind = PsmfPacket::Kind::Video;
+    out.pts = pts;
+    out.data.assign(m_video_buf.begin(), m_video_buf.begin() + static_cast<std::ptrdiff_t>(cut));
+    out.keyframe = payload_is_keyframe(out.data.data(), out.data.size());
+    m_info.has_video = true;
+    if (pts != PSMF_NOPTS) m_position = static_cast<double>(pts) / 90000.0;
+
+    m_video_buf.erase(m_video_buf.begin(), m_video_buf.begin() + static_cast<std::ptrdiff_t>(cut));
+    size_t keep = 0;
+    while (keep < m_video_marks.size() && m_video_marks[keep].off < cut) ++keep;
+    m_video_marks.erase(m_video_marks.begin(), m_video_marks.begin() + static_cast<std::ptrdiff_t>(keep));
+    for (VideoMark& m : m_video_marks) m.off -= cut;
+    m_video_scan = 0;  // recomputed from the new AU's own AUD
+    return true;
+}
+
 
 bool PsmfDemuxer::read(PsmfPacket& out) {
     out = PsmfPacket{};

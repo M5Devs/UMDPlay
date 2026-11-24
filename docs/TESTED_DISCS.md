@@ -229,6 +229,7 @@ wrong place and reports *"No .MPS/.PMF files found in STREAM/ directory"* — a
 | 480i `yadif` deinterlace | both video discs | Optional libavfilter; pass `range=`/`colorspace=` |
 | `--probe` cover-art accuracy | Blue Harvest | Report on-disc presence, not windowed-only SDL textures |
 | Recent-disc dedup | — | `weakly_canonical()` identity key (resolves symlinks / `..`) |
+| Video AU reassembly | Blue Harvest | PSMF splits one access unit across several PES packets; concatenate until the next AUD instead of treating each PES as an AU (300 KB/s of sliced-in-half frames → clean 480i) |
 
 ---
 

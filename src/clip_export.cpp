@@ -185,7 +185,9 @@ bool export_clip(const std::string& iso_path,
     const int vw = decoder.video_width();
     const int vh = decoder.video_height();
     if (vw <= 0 || vh <= 0) {
-        std::cerr << "[-] clip_export: stream has no usable video dimensions\n";
+        std::cerr << "[-] clip_export: stream has no usable video dimensions ("
+                  << (decoder.has_video() ? decoder.video_backend_name() : "no video backend")
+                  << ", " << vw << "x" << vh << ")\n";
         decoder.close();
         return false;
     }
@@ -220,12 +222,14 @@ bool export_clip(const std::string& iso_path,
     const double total_frames = duration_seconds * fps;
     double video_frames = 0.0;
     size_t audio_bytes = 0;
+    int    interlaced_frames = 0;
 
     while (video_frames < total_frames) {
         pcm.clear();
         const FrameType ft = decoder.read_frame(frame, pcm);
         if (ft == FrameType::Eof) break;
         if (ft == FrameType::Video) {
+            if (decoder.last_frame_interlaced()) ++interlaced_frames;
             write_yuv420p(vf, frame);
             ++video_frames;
         } else if (ft == FrameType::Audio && !pcm.empty()) {
@@ -240,7 +244,8 @@ bool export_clip(const std::string& iso_path,
     af.close();
 
     std::cout << "[*] clip_export: decoded " << static_cast<int>(video_frames)
-              << " video frames, " << audio_bytes << " audio bytes\n";
+              << " video frames (" << interlaced_frames << " field-coded), "
+              << audio_bytes << " audio bytes\n";
 
     if (video_frames < 1) {
         std::cerr << "[-] clip_export: no video frames decoded\n";

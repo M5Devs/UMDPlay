@@ -163,6 +163,14 @@ UMDPlay.
    four zero bytes (`is_sony_frame_sync`). UMD-Music discs switch `0x55`→`0xD5`
    **mid-stream**; hardcoding `0x55`/696 yields **0 audio bytes** on them.
 
+2b. **One video access unit spans several PES packets.** PSMF cuts at 2048-byte
+   sector boundaries, not at NAL edges, so a `0xE0` PES payload can start in the
+   middle of a slice and carry no PTS. `PsmfDemuxer` concatenates the payloads and
+   emits an AU only when the next **AUD** (`00 00 01 09`) shows up — feeding each
+   PES as an AU makes `h264dec` treat mid-slice bytes as a NAL header (smeared,
+   streaked picture). Streams that really do keep one AU per PES are detected
+   from the first payload and framed the old way.
+
 3. **Frame stride is measured, not assumed.** `PsmfDemuxer::detect_stride()`
    histograms `0F D0 48 <xx>` sync-word gaps over a byte window (dominant small
    gap wins). Frame length prefers the distance to the next sync header (clamped

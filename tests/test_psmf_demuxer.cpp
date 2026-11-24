@@ -105,6 +105,35 @@ std::vector<uint8_t> build_stream(uint32_t frames, uint32_t stride,
     return out;
 }
 
+
+// Build a stream the way a UMD disc stores video: every access unit opens with
+// an AUD and is spread over `parts` PES packets (the container cuts at sector
+// boundaries, not at NAL edges). Only the first packet of an AU carries a PTS.
+std::vector<uint8_t> build_aud_stream(uint32_t frames, uint32_t parts) {
+    std::vector<uint8_t> out;
+    int64_t pts = 0;
+    for (uint32_t f = 0; f < frames; ++f) {
+        std::vector<uint8_t> au = {0x00, 0x00, 0x00, 0x01, 0x09, 0x10};  // AUD
+        const auto slice = h264_nal(f % 5 == 0 ? 5 : 1, 600);
+        au.insert(au.end(), slice.begin(), slice.end());
+
+        const size_t chunk = (au.size() + parts - 1) / parts;
+        for (uint32_t k = 0; k < parts; ++k) {
+            const size_t b = k * chunk;
+            if (b >= au.size()) break;
+            const size_t e = std::min(au.size(), b + chunk);
+            put_pack(out);
+            put_pes(out, 0xE0, k == 0, pts,
+                    std::vector<uint8_t>(au.begin() + static_cast<std::ptrdiff_t>(b),
+                                         au.begin() + static_cast<std::ptrdiff_t>(e)),
+                    false);
+        }
+        pts += 3003;  // 29.97 fps
+    }
+    put_pes(out, 0xB9, false, 0, {}, false);  // program end
+    return out;
+}
+
 std::string write_temp(const std::vector<uint8_t>& bytes, const char* name) {
     const fs::path p = fs::temp_directory_path() / name;
     std::ofstream f(p, std::ios::binary);
@@ -317,6 +346,48 @@ int main() {
                 reader.close();
             }
         }
+    }
+
+
+    // --- access-unit reassembly: AUD-delimited AUs spanning PES packets ---
+    {
+        const uint32_t frames = 12;
+        auto bytes = build_aud_stream(frames, /*parts=*/3);
+        const std::string path = write_temp(bytes, "umdplay_psmf_aud.mps");
+
+        umdplay::DiscReader reader;
+        CHECK(reader.open(path));
+        PsmfDemuxer demux;
+        CHECK(demux.open(&reader, 0, bytes.size()));
+
+        PsmfPacket pkt;
+        uint32_t video = 0;
+        int bad_pts = 0;
+        size_t first_size = 0;
+        while (demux.read(pkt)) {
+            if (pkt.kind != PsmfPacket::Kind::Video) continue;
+            if (video == 0) {
+                first_size = pkt.data.size();
+                CHECK(pkt.keyframe);
+                CHECK(pkt.pts == 0);
+                // The whole AU, not just the first PES chunk.
+                CHECK(pkt.data.size() > 600);
+                CHECK(pkt.data[0] == 0 && pkt.data[1] == 0 && pkt.data[2] == 0 &&
+                      pkt.data[3] == 1 && pkt.data[4] == 0x09);
+            } else {
+                if (pkt.data.size() != first_size) ++bad_pts;  // uniform AUs
+                if (pkt.pts != umdplay::PSMF_NOPTS &&
+                    pkt.pts != static_cast<int64_t>(video) * 3003) {
+                    ++bad_pts;
+                }
+            }
+            ++video;
+        }
+        CHECK(video == frames);
+        CHECK(bad_pts == 0);
+        demux.close();
+        reader.close();
+        std::remove(path.c_str());
     }
 
     if (g_failures != 0) {
