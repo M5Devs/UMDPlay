@@ -82,9 +82,18 @@ public:
     int video_width() const;
     int video_height() const;
 
-    // Pixel aspect ratio of the video (1.0 when square/unknown). Used by the
-    // player's Zoom modes so anamorphic 720x480 renders at its true shape.
+    // Presentation pixel aspect ratio of the video. A 720x480 NTSC frame whose
+    // stream flags a square/unspecified SAR is authored for 4:3 television, so
+    // it reports 8/9 rather than stretching the picture to 3:2; an anamorphic
+    // SAR from the stream is passed through untouched.
     float video_par() const;
+
+    // Content time (seconds) of the first sample of the PCM that read_frame()
+    // hands out next, i.e. the audio's own PTS aligned to the first post-seek
+    // picture. Negative until known. A player anchors its audio clock here
+    // instead of on the next picture, so the picture can never jump ahead of
+    // the sound it was decoded with.
+    double pcm_time() const { return m_pcm_time; }
 
     // Human-readable video codec name ("h264", ...), or "" when unknown.
     const char* video_codec_name() const;
@@ -135,6 +144,12 @@ private:
     // post-seek skip). Returns true when any bytes were produced.
     bool drain_pcm(std::vector<uint8_t>& pcm, size_t max_bytes);
 
+    // Whether the PCM may be handed out yet. Audio is held until the first
+    // picture has fixed the timeline, so apply_align() can still pad or trim
+    // it; a stream with no audio PTS, or no video at all, has nothing to wait
+    // for and releases immediately.
+    bool timeline_ready() const;
+
     void save_ppm(const umdplay::VideoFrame& frame, const std::string& filename);
 
     umdplay::DiscReader  m_reader;             // ISO or CHD disc image (read_at)
@@ -171,6 +186,7 @@ private:
     double           m_clock       = 0.0;   // last decoded video PTS (seconds)
     bool             m_resync_video = false; // drop to next keyframe after a seek
     double           m_pts_anchor  = -1.0;  // video PTS of the first post-seek frame
+    double           m_pcm_time    = -1.0;  // content time of the next PCM sample
 
     umdplay::DeinterlaceMode m_deinterlace = umdplay::DeinterlaceMode::Smart;
     bool             m_last_interlaced  = false;

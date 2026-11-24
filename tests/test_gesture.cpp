@@ -135,6 +135,18 @@ void test_aspect_modes() {
     }
 }
 
+void test_aspect_43_default_par() {
+    // Square-flagged 720x480 UMD video is authored for 4:3: it must not be
+    // stretched to 3:2 by treating the SAR at face value.
+    const float par = aspect::display_par(720, 480, 1.0f);
+    CHECK(near(par, 8.0f / 9.0f, 1e-5f));
+    aspect::Rect r = aspect::fit(aspect::Mode::Auto, 720, 480, par, 1280, 720);
+    CHECK(near(r.w / r.h, 4.0f / 3.0f, 0.01f));
+    // A stream that really is anamorphic keeps its own SAR.
+    CHECK(near(aspect::display_par(720, 480, 32.0f / 27.0f), 32.0f / 27.0f, 1e-5f));
+    CHECK(near(aspect::display_par(1280, 720, 1.0f), 1.0f, 1e-5f));
+}
+
 void test_aspect_anamorphic_par() {
     // Anamorphic 720x480 with PAR 32:27 -> ~1.78 display aspect.
     const float par = 32.0f / 27.0f;
@@ -147,14 +159,20 @@ void test_aspect_cycle_and_labels() {
     using aspect::Mode;
     CHECK(aspect::next(Mode::Auto) == Mode::R16x9);
     CHECK(aspect::next(Mode::R16x9) == Mode::R4x3);
-    CHECK(aspect::next(Mode::R4x3) == Mode::Fill);
-    CHECK(aspect::next(Mode::Fill) == Mode::Auto);
-    CHECK(aspect::prev(Mode::Auto) == Mode::Fill);
-    CHECK(aspect::prev(Mode::Fill) == Mode::R4x3);
-    CHECK(std::string(aspect::label(Mode::Auto)) == "Auto (Original)");
+    CHECK(aspect::next(Mode::R4x3) == Mode::R3x2);
+    CHECK(aspect::next(Mode::R3x2) == Mode::Fill);
+    CHECK(aspect::next(Mode::Fill) == Mode::Stretch);
+    CHECK(aspect::next(Mode::Stretch) == Mode::Auto);
+    CHECK(aspect::prev(Mode::Auto) == Mode::Stretch);
+    CHECK(aspect::prev(Mode::Stretch) == Mode::Fill);
+    CHECK(aspect::prev(Mode::Fill) == Mode::R3x2);
+    CHECK(aspect::prev(Mode::R3x2) == Mode::R4x3);
+    CHECK(std::string(aspect::label(Mode::Auto)) == "Auto (4:3)");
     CHECK(std::string(aspect::label(Mode::R16x9)) == "16:9");
     CHECK(std::string(aspect::label(Mode::R4x3)) == "4:3");
+    CHECK(std::string(aspect::label(Mode::R3x2)) == "3:2");
     CHECK(std::string(aspect::label(Mode::Fill)) == "Fill");
+    CHECK(std::string(aspect::label(Mode::Stretch)) == "Stretch");
 }
 
 void test_aspect_degenerate() {
@@ -173,6 +191,7 @@ int main() {
     test_slow_short_nudge_is_neither();
     test_reset_cancels();
     test_aspect_modes();
+    test_aspect_43_default_par();
     test_aspect_anamorphic_par();
     test_aspect_cycle_and_labels();
     test_aspect_degenerate();

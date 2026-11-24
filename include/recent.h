@@ -18,4 +18,19 @@ std::vector<std::string> load();
 // Returns false if the list could not be written.
 bool add(const std::string& iso_path, size_t max_entries = 12);
 
+// --- resume positions ------------------------------------------------------
+// "Where I stopped watching" per disc, stored beside the recent list as
+// `path<TAB>seconds` per line and keyed by the same canonical path, so the
+// same disc opened any way offers the same resume point.
+
+// Absolute path to the resume file.
+std::string positions_path();
+
+// Seconds saved for `iso_path`, or -1 when there is none (or it is unreadable).
+double load_position(const std::string& iso_path);
+
+// Save `seconds` for `iso_path` (<= 0 erases the entry). Trimmed to
+// `max_entries` most-recently-written discs. Returns false on a write error.
+bool save_position(const std::string& iso_path, double seconds, size_t max_entries = 32);
+
 }  // namespace recent

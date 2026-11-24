@@ -164,6 +164,8 @@ Item {
 
                     Repeater {
                         model: [
+                            { icon: "camera", act: "snapshot", size: 30 },
+                            { icon: "ab", act: "abloop", size: 30 },
                             { icon: "skip-prev", act: "chapter", size: 30 },
                             { icon: "rewind", act: "back", size: 30 },
                             { icon: "play", act: "toggle", size: 38 },
@@ -179,7 +181,10 @@ Item {
                                 anchors.fill: parent
                                 radius: width / 2
                                 color: modelData.act === "toggle" ? "transparent"
-                                    : (ma.containsMouse ? Theme.containerHigh : "#8C141F37")
+                                    : modelData.act === "abloop" && osd.player
+                                        && osd.player.abLoopState === "looping"
+                                        ? Theme.cyan
+                                        : (ma.containsMouse ? Theme.containerHigh : "#8C141F37")
                                 border.width: modelData.act === "toggle" ? 0 : 1
                                 border.color: "#2EFFFFFF"
                             }
@@ -201,7 +206,10 @@ Item {
                                     ? (osd.player && osd.player.playing ? "pause" : "play")
                                     : modelData.icon
                                 size: modelData.act === "toggle" ? 18 : 14
-                                color: modelData.act === "toggle" ? "#FFFFFF" : Theme.onSurface
+                                color: modelData.act === "toggle" ? "#FFFFFF"
+                                    : modelData.act === "abloop" && osd.player
+                                        && osd.player.abLoopState === "looping"
+                                        ? "#003543" : Theme.onSurface
                                 weight: 2
                             }
 

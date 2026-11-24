@@ -159,6 +159,29 @@ Item {
                 circle(7, 8.8, 0.9, true); circle(12, 8.8, 0.9, true);
                 circle(17, 8.8, 0.9, true);
                 break;
+            case "camera":
+                // Body with a raised viewfinder hump and a big lens: readable
+                // at 14 px, where a thin outline would read as a dot.
+                rrect(2.6, 7.0, 18.8, 12.4, 2.6); ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(7.6, 7.0); ctx.lineTo(9.2, 4.4); ctx.lineTo(14.8, 4.4);
+                ctx.lineTo(16.4, 7.0);
+                ctx.stroke();
+                circle(12, 13.2, 4.0, false);
+                circle(12, 13.2, 1.5, true);
+                break;
+            case "ab":
+                // Two loop markers with a repeating arrow between them.
+                line(4.0, 6.4, 4.0, 17.6);
+                line(4.0, 6.4, 7.4, 6.4);
+                line(4.0, 17.6, 7.4, 17.6);
+                line(20.0, 6.4, 20.0, 17.6);
+                line(20.0, 6.4, 16.6, 6.4);
+                line(20.0, 17.6, 16.6, 17.6);
+                line(8.4, 12.0, 15.6, 12.0);
+                line(15.6, 12.0, 13.4, 9.9);
+                line(15.6, 12.0, 13.4, 14.1);
+                break;
             case "check":
                 line(5, 12.5, 10, 17.5); line(10, 17.5, 19, 6.5);
                 break;

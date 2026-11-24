@@ -26,6 +26,9 @@ qt_add_library(avera_ui SHARED
 )
 
 target_include_directories(avera_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# Header-only helpers shared with the core (aspect geometry, playback tuning
+# constants). Nothing is linked: these are pure, dependency-free headers.
+target_include_directories(avera_ui PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(avera_ui PUBLIC
     Qt6::Core Qt6::Gui Qt6::Quick Qt6::Qml Qt6::Multimedia)
 
@@ -56,6 +59,8 @@ qt_add_resources(avera_ui "avera_qml"
         qml/AveraUI/PlayerView.qml
         qml/AveraUI/TransportOsd.qml
         qml/AveraUI/SettingsPanel.qml
+        qml/AveraUI/SettingSlider.qml
+        qml/AveraUI/Toast.qml
 )
 
 # Plus Jakarta Sans (SIL OFL 1.1) — the Stitch design's typeface. Bundled so the

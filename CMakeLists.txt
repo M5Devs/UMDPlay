@@ -231,7 +231,6 @@ add_library(umdplay_core STATIC
     src/atrac3p/atrac3p_tables.cpp
     src/recent.cpp
     src/gesture.cpp
-    src/aspect.cpp
     src/playlist_parser.cpp
     src/rco_parser.cpp
     src/vsmx_vm.cpp
@@ -313,6 +312,14 @@ add_executable(test_audio_decoder tests/test_audio_decoder.cpp)
 target_link_libraries(test_audio_decoder PRIVATE umdplay_core)
 target_compile_options(test_audio_decoder PRIVATE ${UMDPLAY_WARN_FLAGS})
 add_test(NAME test_audio_decoder COMMAND test_audio_decoder)
+
+# Live playback tweaks: speed ladder, audio-sync nudge, A-B loop state machine,
+# latency-corrected audio clock, pitch-preserving time stretch, and the 4:3
+# default for square-flagged 720x480 UMD video.
+add_executable(test_tuning tests/test_tuning.cpp)
+target_link_libraries(test_tuning PRIVATE umdplay_core)
+target_compile_options(test_tuning PRIVATE ${UMDPLAY_WARN_FLAGS})
+add_test(NAME test_tuning COMMAND test_tuning)
 
 add_executable(test_param_sfo tests/test_param_sfo.cpp)
 target_link_libraries(test_param_sfo PRIVATE umdplay_core)

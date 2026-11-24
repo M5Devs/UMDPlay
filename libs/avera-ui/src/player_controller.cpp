@@ -9,8 +9,10 @@
 namespace avera {
 
 namespace {
-constexpr int kPollMs = 50;        // 20 Hz state mirror
-constexpr int kOsdHideMs = 3500;   // auto-hide delay for the transport bar
+constexpr int kPollMs = 50;         // 20 Hz state mirror
+constexpr int kOsdHideMs = 3500;    // auto-hide delay for the transport bar
+constexpr int kToastMs = 1700;      // how long a floating toast stays up
+constexpr int kSaveEveryTicks = 100;  // ~5 s of playback between position saves
 }  // namespace
 
 AveraPlayerController::AveraPlayerController(QObject* parent) : QObject(parent) {
@@ -24,6 +26,15 @@ AveraPlayerController::AveraPlayerController(QObject* parent) : QObject(parent) 
     connect(m_osdTimer, &QTimer::timeout, this, [this] {
         if (!m_settingsOpen) hideOsd();
     });
+
+    m_toastTimer = new QTimer(this);
+    m_toastTimer->setSingleShot(true);
+    m_toastTimer->setInterval(kToastMs);
+    connect(m_toastTimer, &QTimer::timeout, this, [this] {
+        if (!m_toastVisible) return;
+        m_toastVisible = false;
+        emit toastChanged();
+    });
 }
 
 AveraPlayerController::~AveraPlayerController() = default;
@@ -32,6 +43,8 @@ void AveraPlayerController::setBackend(AveraPlayerBackend* backend) {
     m_backend = backend;
     if (m_backend) {
         m_backend->setDeinterlaceMode(m_deinterlaceMode);
+        applySpeedToBackend();
+        m_backend->setAudioDelayMs(m_audioDelayMs);
         m_timer->start();
     } else {
         m_timer->stop();
@@ -89,6 +102,24 @@ void AveraPlayerController::tick() {
     if (!qFuzzyCompare(pos + 1.0, m_position + 1.0)) { m_position = pos; posDirty = true; }
     if (!qFuzzyCompare(dur + 1.0, m_duration + 1.0)) { m_duration = dur; posDirty = true; }
 
+    // A-B repeat: when the playhead reaches B, jump back to A. The seek is a
+    // discontinuity, so the backend re-anchors its audio clock itself.
+    if (m_abLoop.active() && pos >= m_abLoop.b) {
+        m_backend->seekTo(m_abLoop.a);
+        m_position = m_abLoop.a;
+        posDirty = true;
+    }
+
+    // Persist "where I stopped" a few times a minute, and never mid-seek.
+    if (m_playing && m_position > 5.0) {
+        if (++m_saveCountdown >= kSaveEveryTicks) {
+            m_saveCountdown = 0;
+            emit positionSaveRequested(m_position);
+        }
+    } else {
+        m_saveCountdown = 0;
+    }
+
     if (stateDirty) emit stateChanged();
     if (posDirty) emit positionChanged();
 }
@@ -137,10 +168,208 @@ void AveraPlayerController::cycleDeinterlaceMode() {
     setDeinterlaceMode(QString::fromLatin1(kOrder[(at + 1) % 3]));
 }
 
+// --- aspect ----------------------------------------------------------------
+
+QString AveraPlayerController::aspectMode() const {
+    return QString::fromLatin1(aspect::name(m_aspect));
+}
+
 void AveraPlayerController::setAspectMode(const QString& mode) {
-    if (mode == m_aspect) return;
-    m_aspect = mode;
+    const QByteArray utf8 = mode.toUtf8();
+    const aspect::Mode parsed = aspect::mode_from_name(utf8.constData());
+    if (parsed == m_aspect) return;
+    m_aspect = parsed;
     emit aspectModeChanged();
+    toastAspect();
+}
+
+QString AveraPlayerController::aspectText() const {
+    return QString::fromLatin1(aspect::label(m_aspect));
+}
+
+void AveraPlayerController::cycleAspect() {
+    m_aspect = aspect::cycle_player(m_aspect);
+    emit aspectModeChanged();
+    toastAspect();
+}
+
+QVariantMap AveraPlayerController::videoRect(const QString& mode, int vw, int vh, qreal par,
+                                             qreal ww, qreal wh) const {
+    const QByteArray utf8 = mode.toUtf8();
+    const aspect::Rect r = aspect::fit(aspect::mode_from_name(utf8.constData()),
+                                       float(vw), float(vh), float(par),
+                                       float(ww), float(wh));
+    QVariantMap out;
+    out.insert(QStringLiteral("x"), r.x);
+    out.insert(QStringLiteral("y"), r.y);
+    out.insert(QStringLiteral("w"), r.w);
+    out.insert(QStringLiteral("h"), r.h);
+    return out;
+}
+
+void AveraPlayerController::toastAspect() {
+    showToast(QStringLiteral("Aspect: %1").arg(aspectText()));
+}
+
+// --- speed -----------------------------------------------------------------
+
+void AveraPlayerController::setSpeed(double speed) {
+    const double clamped = umdplay::clamp_speed(speed);
+    if (qFuzzyCompare(clamped, m_speed)) return;
+    m_speed = clamped;
+    applySpeedToBackend();
+    emit speedChanged();
+    toastSpeed();
+}
+
+void AveraPlayerController::applySpeedToBackend() {
+    if (m_backend) m_backend->setSpeed(m_speed);
+}
+
+QString AveraPlayerController::speedText() const {
+    char buf[16];
+    return QString::fromLatin1(umdplay::speed_label(m_speed, buf, sizeof(buf)));
+}
+
+void AveraPlayerController::speedUp() { setSpeed(umdplay::speed_up(m_speed)); }
+void AveraPlayerController::speedDown() { setSpeed(umdplay::speed_down(m_speed)); }
+void AveraPlayerController::resetSpeed() { setSpeed(1.0); }
+
+void AveraPlayerController::toastSpeed() {
+    showToast(QStringLiteral("Speed: %1").arg(speedText()));
+}
+
+// --- audio sync nudge ------------------------------------------------------
+
+void AveraPlayerController::setAudioDelayMs(int ms) {
+    const int clamped = umdplay::clamp_audio_delay_ms(ms);
+    if (clamped == m_audioDelayMs) return;
+    m_audioDelayMs = clamped;
+    if (m_backend) m_backend->setAudioDelayMs(m_audioDelayMs);
+    emit audioDelayChanged();
+    toastDelay();
+}
+
+QString AveraPlayerController::audioDelayText() const {
+    char buf[32];
+    return QString::fromLatin1(umdplay::audio_delay_label(m_audioDelayMs, buf, sizeof(buf)));
+}
+
+void AveraPlayerController::nudgeAudioDelay(int dir) {
+    if (dir == 0) return;
+    setAudioDelayMs(umdplay::step_audio_delay_ms(m_audioDelayMs, dir));
+}
+
+void AveraPlayerController::toastDelay() {
+    char buf[48];
+    showToast(QString::fromLatin1(
+        umdplay::audio_delay_label(m_audioDelayMs, buf, sizeof(buf), "Audio delay: ")));
+}
+
+// --- picture effects -------------------------------------------------------
+
+void AveraPlayerController::setBrightness(qreal v) {
+    v = qBound<qreal>(-1.0, v, 1.0);
+    if (qFuzzyCompare(v + 1.0, m_brightness + 1.0)) return;
+    m_brightness = v;
+    emit videoEffectsChanged(m_brightness, m_contrast, m_saturation);
+}
+
+void AveraPlayerController::setContrast(qreal v) {
+    v = qBound<qreal>(0.0, v, 2.0);
+    if (qFuzzyCompare(v + 1.0, m_contrast + 1.0)) return;
+    m_contrast = v;
+    emit videoEffectsChanged(m_brightness, m_contrast, m_saturation);
+}
+
+void AveraPlayerController::setSaturation(qreal v) {
+    v = qBound<qreal>(0.0, v, 2.0);
+    if (qFuzzyCompare(v + 1.0, m_saturation + 1.0)) return;
+    m_saturation = v;
+    emit videoEffectsChanged(m_brightness, m_contrast, m_saturation);
+}
+
+bool AveraPlayerController::effectsActive() const {
+    return m_brightness != 0.0 || m_contrast != 1.0 || m_saturation != 1.0;
+}
+
+void AveraPlayerController::resetVideoEffects() {
+    const bool changed = effectsActive();
+    m_brightness = 0.0;
+    m_contrast = 1.0;
+    m_saturation = 1.0;
+    if (changed) {
+        emit videoEffectsChanged(m_brightness, m_contrast, m_saturation);
+        showToast(QStringLiteral("Picture reset"));
+    }
+}
+
+// --- A-B loop --------------------------------------------------------------
+
+QString AveraPlayerController::abLoopState() const {
+    switch (m_abLoop.state) {
+        case umdplay::AbLoopState::Off:     return QStringLiteral("off");
+        case umdplay::AbLoopState::SetA:    return QStringLiteral("a");
+        case umdplay::AbLoopState::Looping: return QStringLiteral("looping");
+    }
+    return QStringLiteral("off");
+}
+
+QString AveraPlayerController::abLoopText() const {
+    char buf[64];
+    return QString::fromLatin1(m_abLoop.label(buf, sizeof(buf)));
+}
+
+void AveraPlayerController::cycleAbLoop() {
+    m_abLoop.press(m_position);
+    emit abLoopChanged();
+
+    switch (m_abLoop.state) {
+        case umdplay::AbLoopState::Off:
+            showToast(QStringLiteral("A-B repeat off"));
+            break;
+        case umdplay::AbLoopState::SetA:
+            showToast(QStringLiteral("A at %1 \u00b7 press L for B").arg(formatTime(m_abLoop.a)));
+            break;
+        case umdplay::AbLoopState::Looping:
+            showToast(QStringLiteral("Looping %1 \u2192 %2")
+                          .arg(formatTime(m_abLoop.a), formatTime(m_abLoop.b)));
+            break;
+    }
+}
+
+// --- snapshots -------------------------------------------------------------
+
+void AveraPlayerController::takeSnapshot() {
+    if (!m_backend) return;
+    const QString path = m_backend->saveSnapshot(QString());
+    if (path.isEmpty()) {
+        showToast(QStringLiteral("Snapshot failed"));
+        return;
+    }
+    emit snapshotSaved(path);
+    showToast(QStringLiteral("Snapshot saved"));
+}
+
+// --- resume ----------------------------------------------------------------
+
+void AveraPlayerController::setResumePoint(double seconds) {
+    const double clamped = (seconds > 0.0 && qIsFinite(seconds)) ? seconds : 0.0;
+    if (qFuzzyCompare(clamped + 1.0, m_resumePoint + 1.0)) return;
+    m_resumePoint = clamped;
+    emit resumePointChanged();
+}
+
+void AveraPlayerController::clearResumePoint() { setResumePoint(0.0); }
+
+// --- toast -----------------------------------------------------------------
+
+void AveraPlayerController::showToast(const QString& text) {
+    m_toastText = text;
+    m_toastVisible = !text.isEmpty();
+    emit toastChanged();
+    if (m_toastVisible) m_toastTimer->start();
+    else m_toastTimer->stop();
 }
 
 void AveraPlayerController::pokeOsd() {
@@ -160,14 +389,21 @@ void AveraPlayerController::hideOsd() {
 
 void AveraPlayerController::togglePlay() {
     if (!m_backend) return;
-    if (m_backend->playing()) m_backend->pause();
-    else m_backend->play();
-    pokeOsd();
-    tick();
+    if (m_backend->playing()) pause();
+    else play();
 }
 
 void AveraPlayerController::play() {
     if (!m_backend) return;
+    // Resume is armed at most once: the first play after opening a disc picks
+    // up where the last session stopped.
+    if (m_resumePoint > 0.0) {
+        const double at = m_resumePoint;
+        m_resumePoint = 0.0;
+        emit resumePointChanged();
+        m_backend->seekTo(at);
+        showToast(QStringLiteral("Resumed at %1").arg(formatTime(at)));
+    }
     m_backend->play();
     pokeOsd();
     tick();
@@ -176,12 +412,14 @@ void AveraPlayerController::play() {
 void AveraPlayerController::pause() {
     if (!m_backend) return;
     m_backend->pause();
+    if (m_position > 5.0) emit positionSaveRequested(m_position);
     pokeOsd();
     tick();
 }
 
 void AveraPlayerController::stop() {
     if (!m_backend) return;
+    if (m_position > 5.0) emit positionSaveRequested(m_position);
     m_backend->stop();
     hideOsd();
     tick();
@@ -190,6 +428,12 @@ void AveraPlayerController::stop() {
 void AveraPlayerController::seekTo(double seconds) {
     if (!m_backend) return;
     m_backend->seekTo(seconds);
+    // A seek inside the loop keeps the loop; a seek outside it drops it, so a
+    // chapter jump is not silently dragged back to A.
+    if (m_abLoop.active() && (seconds < m_abLoop.a - 0.5 || seconds > m_abLoop.b + 0.5)) {
+        m_abLoop.clear();
+        emit abLoopChanged();
+    }
     pokeOsd();
     tick();
 }
@@ -199,16 +443,12 @@ void AveraPlayerController::skip(double seconds) {
     double target = m_position + seconds;
     if (target < 0) target = 0;
     if (m_duration > 0 && target > m_duration) target = m_duration;
-    m_backend->seekTo(target);
-    pokeOsd();
-    tick();
+    seekTo(target);
 }
 
 void AveraPlayerController::seekFraction(double fraction) {
     if (!m_backend || m_duration <= 0) return;
-    m_backend->seekTo(qBound(0.0, fraction, 1.0) * m_duration);
-    pokeOsd();
-    tick();
+    seekTo(qBound(0.0, fraction, 1.0) * m_duration);
 }
 
 void AveraPlayerController::seekChapter(int index) {
@@ -216,15 +456,7 @@ void AveraPlayerController::seekChapter(int index) {
     const QVariantList ch = m_backend->chapters();
     if (index < 0 || index >= ch.size()) return;
     const double t = ch.at(index).toMap().value(QStringLiteral("seconds")).toDouble();
-    m_backend->seekTo(t);
-    pokeOsd();
-    tick();
-}
-
-void AveraPlayerController::cycleAspect() {
-    if (m_aspect == QLatin1String("fit")) setAspectMode(QStringLiteral("zoom"));
-    else if (m_aspect == QLatin1String("zoom")) setAspectMode(QStringLiteral("stretch"));
-    else setAspectMode(QStringLiteral("fit"));
+    seekTo(t);
 }
 
 }  // namespace avera

@@ -59,7 +59,9 @@ apps/avera-player/      Qt front end: binds Decoder to AveraUI and h264dec (H.26
 | **decoder** | `include/decoder.h`, `src/decoder.cpp` | Drives `PsmfDemuxer` → a `VideoDecoderBackend` (H.264) and an `AudioDecoderBackend` (ATRAC3+); seek/resync, A/V clock + PTS alignment, deinterlace option. Links **no** FFmpeg library. |
 | **video_decoder_backend** | `include/video_decoder_backend.h`, `include/video_frame.h`, `src/h264_video_decoder.cpp` | The video seam: push Annex-B access units, pull `VideoFrame` (tight YUV420P, one allocation). Default backend wraps `third_party/h264dec` + `h264.c` (SPS geometry/PAR); `src/ffmpeg_video_decoder.cpp` is the optional A/B backend (`-DUMDPLAY_NATIVE_VIDEO=OFF`). |
 | **deinterlace / yuv_convert** | `include/deinterlace.h`, `include/yuv_convert.h`, `src/deinterlace.cpp`, `src/yuv_convert.cpp` | In-memory replacements for libavfilter/yadif (`DeinterlaceMode` Off/Blend/Smart on woven 480i frames) and libswscale (BT.601 YUV420P → RGB24/RGBA/BGRA, 16.16 fixed point). |
-| **av_sync** | `include/av_sync.h`, `src/av_sync.cpp` | Audio-master picture pacing: `av_audio_clock()` (anchor PTS + played frames) and `av_decide()` → Hold/Drop/Present against an early/late window. |
+| **av_sync** | `include/av_sync.h`, `src/av_sync.cpp` | Audio-master picture pacing: `av_audio_clock()` (anchor PTS + played frames, minus device buffer and the user's sync nudge) and `av_decide()` → Hold/Drop/Present against an early/late window. |
+| **playback_tuning** | `include/playback_tuning.h` (header-only) | Pure transport arithmetic shared by the player and the tests: the speed ladder (`kMinSpeed`…`kMaxSpeed`, `next_speed`/`prev_speed`), `clamp_audio_delay_ms`, and `AbLoop` (A/B markers, wrap decision). |
+| **time_stretch** | `include/time_stretch.h` (header-only) | Pitch-preserving playback-rate changer (WSOLA: 30 ms Hann windows, 50 % overlap, correlation-searched splice) used by `AveraAudioOutput` whenever speed ≠ 1.0. |
 | **param_sfo** | `include/param_sfo.h`, `src/param_sfo.cpp` | Bounds-checked `PARAM.SFO` (`\0PSF`) parser — `TITLE`, `DISC_ID`, `CATEGORY`, `APP_VER`. |
 | **playlist_parser** | `include/playlist_parser.h`, `src/playlist_parser.cpp` | Big-endian `PLAYLIST.UMD` (`UMDV0088`/`UMDA0088`) — tracks, clips, 90 kHz chapter markers. |
 | **rco_parser** | `include/rco_parser.h`, `src/rco_parser.cpp` | Little-endian `.RCO` (`\0PRF`) container — TOC, embedded PNGs, object tree, VSMX blob + events. |
@@ -72,8 +74,8 @@ apps/avera-player/      Qt front end: binds Decoder to AveraUI and h264dec (H.26
 | **clip_export** | `include/clip_export.h`, `src/clip_export.cpp` | Headless decode → MP4 (shells out to the `ffmpeg` CLI for H.264/AAC muxing). |
 | **gesture** / **aspect** / **recent** | matching headers | Touch/mouse gesture recognition, zoom/aspect modes, recent-disc persistence. |
 | **atrac3p_decoder** | `include/atrac3p_decoder.h`, `src/atrac3p_decoder.cpp`, `src/atrac3p/` | Native, FFmpeg-free ATRAC3+ decoder: bitstream parser, IMDCT + windowing, gain compensation, GHA tone synthesis, power compensation and the IPQF synthesis bank. Ported from FFmpeg's atrac3plus (LGPL-2.1+, see `NOTICE`). `include/audio_decoder_backend.h` is the `AudioDecoderBackend` seam `Decoder` drives; `make_native_atrac3p_backend()` is the default implementation. |
-| **avera_ui** | `libs/avera-ui/include/avera_ui/*`, `src/*`, `qml/AveraUI/*` | Reusable Qt 6 Quick shell. `AveraHub` (media-center state: nav, disc telemetry, rail categories, hero/peek cards, action focus), `AveraPlayerController` (transport state + OSD timers over a host `AveraPlayerBackend`), `AveraVideoItem` (`VideoSurface`: YUV→RGB + `QSGSimpleTextureNode`), `AveraAudioOutput` (S16 stereo ring → `QAudioSink`), `AveraSfx` (procedural chimes), `ArtProvider` (in-memory PNG cover art for QML `image://discart/<id>`). QML ships in the library's resource at `:/avera/qml/AveraUI`; the Plus Jakarta Sans faces ship at `:/avera/fonts` and are registered by `avera::loadFonts()`. |
-| **avera-player** | `apps/avera-player/main.cpp`, `Main.qml` | The Qt front end: probes the disc (PARAM.SFO title, PLAYLIST.UMD chapters, ICON0/PIC1 art, ISO size), fills the hub, pumps the decoder at ~60 Hz and pushes frames/PCM into the AveraUI items. |
+| **avera_ui** | `libs/avera-ui/include/avera_ui/*`, `src/*`, `qml/AveraUI/*` | Reusable Qt 6 Quick shell. `AveraHub` (media-center state: nav, disc telemetry, rail categories, hero/peek cards, action focus), `AveraPlayerController` (transport state, OSD timers, settings drawer state — speed, audio delay, aspect, A-B loop, picture tuning, snapshots — over a host `AveraPlayerBackend`; `SettingsPanel.qml` / `Toast.qml` / `SettingSlider.qml` are its UI), `AveraVideoItem` (`VideoSurface`: YUV→RGB + `QSGSimpleTextureNode`), `AveraAudioOutput` (S16 stereo ring → `QAudioSink`), `AveraSfx` (procedural chimes), `ArtProvider` (in-memory PNG cover art for QML `image://discart/<id>`). QML ships in the library's resource at `:/avera/qml/AveraUI`; the Plus Jakarta Sans faces ship at `:/avera/fonts` and are registered by `avera::loadFonts()`. |
+| **avera-player** | `apps/avera-player/main.cpp`, `Main.qml` | The Qt front end: probes the disc (PARAM.SFO title, PLAYLIST.UMD chapters, ICON0/PIC1 art, ISO size), fills the hub, pumps the decoder at ~60 Hz and pushes frames/PCM into the AveraUI items. Owns the demux→display pipeline: the bounded picture queue, the PCM ring top-up, the audio-master clock (interpolated, monotonic, with an A/V re-base) and the resume/snapshot hooks. |
 | **logo (embedded)** | `include/umdplay_logo.h`, generated `umdplay_logo_data.cpp` | `assets/umdplay_logo.png` baked into the binary by `cmake/EmbedAsset.cmake`; drawn as the WMC hub header mark and set as the SDL window icon. |
 
 `main.cpp` wires them together: parse args → open disc → build hub state →
@@ -141,6 +143,25 @@ export (`DESIGN.md` tokens → `qml/AveraUI/Theme.qml`). Structure:
 is needed. Every string is real disc data — never a `.MPS` file name, never a
 mock title.
 
+Player hotkeys (VLC/MPC-HC style, handled in `apps/avera-player/Main.qml` →
+`AveraPlayerController`, so the drawer and the keys touch the same state):
+
+| Key | Action |
+|---|---|
+| `Space` | play / pause (`K` is *audio later*, not play — do not document it as play) |
+| `←` / `→` | seek ∓10 s — or cycle the aspect when the drawer is open |
+| `[` `-` / `]` `+` | previous / next speed on the 0.5 / 0.75 / 1 / 1.25 / 1.5 / 2 ladder |
+| `Backspace` | reset speed to 1x |
+| `J` / `K` | audio-delay nudge +50 / −50 ms (the audio-sync control) |
+| `A` | cycle aspect: Auto → 16:9 → 4:3 → 3:2 → Fill → Stretch |
+| `L` | cycle the A-B loop: set A → set B (looping) → clear |
+| `S` | settings drawer; **`Shift+S`** snapshot into `~/Pictures/snapshots` |
+| `Esc` | close the drawer, else leave the player |
+
+**Resume points**: the hub remembers where each disc was left and the player
+offers to continue. They live in `~/.config/umdplay/positions.txt` (plain text,
+written on pause/close); delete it to reproduce a fresh boot.
+
 `QQuickWindow::grabWindow()` is **not** usable for frame-by-frame capture while
 video is playing: each grab paints a fresh node tree, and a node created inside
 the grab cannot own a texture across grabs (black frames, then a crash if you
@@ -161,7 +182,7 @@ SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
     ./build/bin/umdplay --demo --strip settings --screenshot hub.png   # no disc needed
 ```
 
-### Test suites (10)
+### Test suites (12)
 
 `test_psmf_demuxer` (synthetic MPEG-PS `0xE0`/`0xBD` + PTS + variable stride +
 seek; optional real-ISO demux), `test_video_decoder` (native H.264 backend on a
@@ -170,7 +191,8 @@ deinterlacer and the YUV converter), `test_audio_decoder` (PSMF stride detection
 optional real-ISO decode), `test_param_sfo`, `test_recent`, `test_playback`,
 `test_gesture`, `test_playlist` (optional real disc via `UMD_ISO=`),
 `test_chd` (committed `fixtures/pattern.chd`), `test_iso_reader` (synthetic ISO,
-no disc), `test_ui_sfx`.
+no disc), `test_ui_sfx`, `test_tuning` (speed ladder, audio nudge, A-B loop,
+latency-corrected clock, time stretcher, 4:3 default), `test_video_decoder`.
 
 **Always use a local `CHECK(cond)` macro that evaluates unconditionally** — do
 **not** use `assert()`, which is compiled out under `NDEBUG` (Release/CI) and
@@ -311,6 +333,40 @@ UMDPlay.
     from `PATH` to prove the bundle is self-contained.
 
 ---
+
+13. **The stream's frame rate is a lie; the PTS are the truth.** UMD-Video often
+    advertises `29.97 fps` while the PES PTS advance at `1/23.976` (Family Guy
+    is exactly this). Anything paced on a *frame count* then produces 25 % too
+    much audio: the sound runs ahead, the extra pictures get dropped, and the
+    picture judders. `Decoder::read_frame()` therefore paces `pump_audio()` off
+    the stashed picture's own PTS, never `m_fps`.
+
+14. **PCM is held until the first picture fixes the timeline.** `apply_align()`
+    can only pad/trim the audio while it is still queued, and it needs the first
+    picture's PTS as the reference — Sony starts audio ~0.4 s after the first
+    video packet and puts a PTS on only a few packets. `Decoder::read_frame()`
+    therefore releases no PCM until `timeline_ready()`, and calls
+    `apply_align()` before the drain (the opener pre-rolls the PCM, so
+    `pump_audio()` may have nothing left to decode and would never align it).
+
+15. **The audio clock is the frames we handed over, not the device cursor.**
+    `AveraAudioOutput::playedFrames()` counts what `readData` delivered (the
+    device's pull buffer still has to be subtracted — `latencyFrames()`), and
+    the player interpolates between the ~90 ms read blocks with the wall clock.
+    Two traps: a clock built on `QAudioSink::processedUSecs()` drifts against
+    the picture at whatever the sound card is off by (a container's null sink
+    can run *seconds* fast and then drops whole bursts of pictures), and a clock
+    that is allowed to step *backwards* silently costs presentation time at
+    every step. Hence `m_clock_floor` (monotonic) and the interpolation cap.
+    A desync beyond `kResyncSeconds` re-bases the anchor instead of dropping the
+    backlog.
+
+16. **Audio can only come from decoding pictures.** A picture queue that is
+    "full" while the PCM ring is shallow starves the device, freezes the cursor
+    and with it every picture — the classic UMDPlay freeze. `fillQueue()` tops
+    the ring up by decoding *past* the lookahead (bounded by `kMaxLookahead` and
+    `kAudioHighFrames`), and the ring's 2 s cap must never be reached: it would
+    buffer far more audio than the clock models.
 
 ## Coding style
 

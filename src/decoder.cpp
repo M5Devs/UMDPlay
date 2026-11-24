@@ -1,5 +1,7 @@
 #include "decoder.h"
 
+#include "aspect.h"
+
 #include "deinterlace.h"
 #include "yuv_convert.h"
 
@@ -86,6 +88,7 @@ bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
 
     if (!m_video_backend && !m_audio_backend) return false;
     m_psmf_next_pts = umdplay::PSMF_NOPTS;
+    m_pcm_time = -1.0;
 
     // A backend may only learn the picture geometry from a decoded frame
     // (libavcodec parses the SPS on the first slice, not at open). Decode one
@@ -125,6 +128,7 @@ void Decoder::close() {
     m_video_flushed = false;
     m_align_done = false;
     m_psmf_next_pts = umdplay::PSMF_NOPTS;
+    m_pcm_time = -1.0;
     m_psmf_skip_samples = 0;
     m_audio_samples = 0;
     m_vcount = 0;
@@ -153,6 +157,12 @@ bool Decoder::receive_video(umdplay::VideoFrame& out) {
     if (out.interlaced && m_deinterlace != umdplay::DeinterlaceMode::Off)
         umdplay::deinterlace_yuv420p(out, m_deinterlace);
     return true;
+}
+
+bool Decoder::timeline_ready() const {
+    if (m_align_done || m_pts_anchor >= 0.0) return true;
+    if (m_psmf_next_pts == umdplay::PSMF_NOPTS) return true;   // nothing to align to
+    return !m_video_backend || m_video_eof;                    // audio-only stream
 }
 
 void Decoder::flush_video() {
@@ -207,6 +217,8 @@ void Decoder::decode_audio_packet(const umdplay::PsmfPacket& pkt) {
 
     if (pkt.pts != umdplay::PSMF_NOPTS && m_psmf_next_pts == umdplay::PSMF_NOPTS) {
         m_psmf_next_pts = pkt.pts;
+        if (m_pcm_time < 0.0)
+            m_pcm_time = static_cast<double>(pkt.pts) / PSMF_TIMESCALE;
     }
 
     const size_t before = m_pcm_ready.size();
@@ -223,7 +235,14 @@ void Decoder::decode_audio_packet(const umdplay::PsmfPacket& pkt) {
 // it starts early, or prepend silence when it starts late.
 void Decoder::apply_align() {
     if (m_align_done) return;
-    if (m_pts_anchor < 0.0 || m_psmf_next_pts == umdplay::PSMF_NOPTS) return;
+    if (m_pts_anchor < 0.0) return;
+    if (m_psmf_next_pts == umdplay::PSMF_NOPTS) {
+        // The audio carries no PTS at all: the only reference is the picture,
+        // so take the queue as starting there and stop waiting.
+        m_align_done = true;
+        m_pcm_time = m_pts_anchor;
+        return;
+    }
     if (m_pcm_ready.empty()) return;
 
     constexpr int    kRate    = 44100;
@@ -235,20 +254,25 @@ void Decoder::apply_align() {
     m_align_done = true;
 
     // Ignore sub-frame noise; never shift more than a few seconds (bad PTS).
-    if (std::llabs(frames) < 2 || std::llabs(frames) > kRate * 5) return;
+    if (std::llabs(frames) < 2) { m_pcm_time = m_pts_anchor; return; }
+    if (std::llabs(frames) > kRate * 5) return;   // implausible: leave the PES time
 
     if (frames > 0) {
         const size_t drop = static_cast<size_t>(frames) * kFrameSz;
         if (drop < m_pcm_ready.size()) {
             m_pcm_ready.erase(m_pcm_ready.begin(),
                               m_pcm_ready.begin() + static_cast<std::ptrdiff_t>(drop));
+            m_audio_samples -= frames;   // the queue now holds that much less
         } else {
             m_psmf_skip_samples = frames - static_cast<int64_t>(m_pcm_ready.size() / kFrameSz);
             m_pcm_ready.clear();
         }
     } else {
         m_pcm_ready.insert(m_pcm_ready.begin(), static_cast<size_t>(-frames) * kFrameSz, 0);
+        m_audio_samples -= frames;       // negative shift: the queue grew
     }
+    // The queue now begins exactly on the picture's content time.
+    m_pcm_time = m_pts_anchor;
 }
 
 bool Decoder::drain_pcm(std::vector<uint8_t>& pcm, size_t max_bytes) {
@@ -301,7 +325,8 @@ FrameType Decoder::read_frame(umdplay::VideoFrame& video_frame,
     // interleaved ahead of it.
     if (!m_video_pending) {
         if (!decode_next_video(m_stashed_video)) {
-            if (drain_pcm(audio_pcm, PCM_CHUNK_CAP)) return FrameType::Audio;
+            if (timeline_ready() && drain_pcm(audio_pcm, PCM_CHUNK_CAP))
+                return FrameType::Audio;
             return FrameType::Eof;
         }
         m_video_pending = true;
@@ -313,12 +338,30 @@ FrameType Decoder::read_frame(umdplay::VideoFrame& video_frame,
     // Pace audio to the video clock: by the end of frame N roughly N/fps
     // seconds of PCM should have been decoded.
     if (m_audio_backend && !m_audio_eof) {
-        const double fps = (m_fps > 0.0 && m_fps < 240.0) ? m_fps : 29.97;
-        const int64_t target = static_cast<int64_t>((m_vcount + 1) * (44100.0 / fps));
-        pump_audio(target);
+        // Pace the audio off the picture's own timestamp, not a frame count:
+        // the stream header advertises 29.97 fps on discs whose PTS advance at
+        // 1/23.976, and a frame-counted target then produces 25% too much
+        // audio — the sound races ahead and the extra pictures are dropped.
+        double video_t = m_stashed_video.pts;
+        if (video_t < 0.0) {
+            const double fps = (m_fps > 0.0 && m_fps < 240.0) ? m_fps : 29.97;
+            video_t = m_clock + 1.0 / fps;
+        }
+        const double audio_start = m_pcm_time >= 0.0 ? m_pcm_time : m_pts_anchor;
+        if (audio_start >= 0.0 && video_t > audio_start)
+            pump_audio(static_cast<int64_t>((video_t - audio_start) * 44100.0));
     }
 
-    if (drain_pcm(audio_pcm, PCM_CHUNK_CAP)) return FrameType::Audio;
+    // Never hand out PCM before the first picture has fixed the timeline.
+    // Sony audio typically starts a few hundred ms after the first picture
+    // (and its PES PTS is only present on some packets), so the PCM can only
+    // be aligned — padded or trimmed to that picture — while it is still
+    // queued here. Emitting a chunk first would start the audio that much
+    // late, and a clock anchored on it would drop every opening picture.
+    // pump_audio() may have nothing left to decode (the opener pre-rolls the
+    // PCM), so the alignment is driven here as well as on arrival.
+    if (!m_align_done) apply_align();
+    if (timeline_ready() && drain_pcm(audio_pcm, PCM_CHUNK_CAP)) return FrameType::Audio;
 
     video_frame = std::move(m_stashed_video);
     m_stashed_video.clear();
@@ -327,6 +370,9 @@ FrameType Decoder::read_frame(umdplay::VideoFrame& video_frame,
     const double pts = video_frame.pts;
     if (pts >= 0.0) m_clock = pts;
     else m_clock += 1.0 / ((m_fps > 0.0 && m_fps < 240.0) ? m_fps : 29.97);
+    // A stream with no PTS at all still needs an anchor for the audio; the
+    // synthesized picture clock is the only timeline it has.
+    if (m_pts_anchor < 0.0) m_pts_anchor = m_clock;
     // Sony PSMF often omits PTS on all but a few video packets, so hand back
     // the synthesised presentation time instead of "unknown": players pace on
     // it, and a frame without a clock is a frame that cannot be synced.
@@ -361,6 +407,7 @@ bool Decoder::seek_absolute(double seconds) {
     m_resync_video = true;
     m_pts_anchor = -1.0;
     m_psmf_next_pts = umdplay::PSMF_NOPTS;
+    m_pcm_time = -1.0;
     m_psmf_skip_samples = 0;
     m_align_done = false;
     m_audio_samples = 0;
@@ -382,7 +429,8 @@ int Decoder::video_height() const {
 }
 
 float Decoder::video_par() const {
-    return m_video_backend ? m_video_backend->par() : 1.0f;
+    if (!m_video_backend) return 1.0f;
+    return aspect::display_par(video_width(), video_height(), m_video_backend->par());
 }
 
 const char* Decoder::video_codec_name() const {

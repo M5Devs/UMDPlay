@@ -1,6 +1,7 @@
 #include "recent.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -67,6 +68,68 @@ std::vector<std::string> load() {
         out.push_back(line);
     }
     return out;
+}
+
+namespace {
+
+struct Entry {
+    std::string path;
+    double seconds = 0.0;
+};
+
+std::vector<Entry> load_positions() {
+    std::vector<Entry> out;
+    std::ifstream f(positions_path());
+    if (!f) return out;
+    std::string line;
+    while (std::getline(f, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+        const auto tab = line.rfind('\t');
+        if (tab == std::string::npos || tab == 0) continue;
+        const std::string path = line.substr(0, tab);
+        try {
+            const double seconds = std::stod(line.substr(tab + 1));
+            if (seconds > 0.0 && std::isfinite(seconds)) out.push_back({path, seconds});
+        } catch (...) {
+            // A corrupt line loses one resume point, never the whole file.
+        }
+    }
+    return out;
+}
+
+bool write_positions(const std::vector<Entry>& entries) {
+    std::error_code ec;
+    fs::create_directories(config_dir(), ec);
+    std::ofstream f(positions_path(), std::ios::trunc);
+    if (!f) return false;
+    for (const auto& e : entries) f << e.path << '\t' << e.seconds << '\n';
+    return static_cast<bool>(f);
+}
+
+}  // namespace
+
+std::string positions_path() { return config_dir() + "/positions.txt"; }
+
+double load_position(const std::string& iso_path) {
+    if (iso_path.empty()) return -1.0;
+    const std::string key = canonical_key(iso_path);
+    for (const auto& e : load_positions()) {
+        if (canonical_key(e.path) == key) return e.seconds;
+    }
+    return -1.0;
+}
+
+bool save_position(const std::string& iso_path, double seconds, size_t max_entries) {
+    if (iso_path.empty()) return false;
+    const std::string key = canonical_key(iso_path);
+
+    std::vector<Entry> list;
+    if (seconds > 0.0 && std::isfinite(seconds)) list.push_back({key, seconds});
+    for (const auto& e : load_positions()) {
+        if (canonical_key(e.path) != key) list.push_back(e);
+    }
+    if (list.size() > max_entries) list.resize(max_entries);
+    return write_positions(list);
 }
 
 bool add(const std::string& iso_path, size_t max_entries) {

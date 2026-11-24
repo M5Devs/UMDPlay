@@ -22,6 +22,9 @@ class AveraVideoItem : public QQuickItem {
     Q_PROPERTY(int sourceHeight READ sourceHeight NOTIFY sourceSizeChanged)
     Q_PROPERTY(qreal pixelAspect READ pixelAspect NOTIFY sourceSizeChanged)
     Q_PROPERTY(bool interlaced READ interlaced NOTIFY hasFrameChanged)
+    Q_PROPERTY(qreal brightness READ brightness WRITE setBrightness NOTIFY effectsChanged)
+    Q_PROPERTY(qreal contrast READ contrast WRITE setContrast NOTIFY effectsChanged)
+    Q_PROPERTY(qreal saturation READ saturation WRITE setSaturation NOTIFY effectsChanged)
 
 public:
     explicit AveraVideoItem(QQuickItem* parent = nullptr);
@@ -43,9 +46,28 @@ public:
     qreal pixelAspect() const;
     bool interlaced() const;
 
+    // --- picture tweaks (VLC's "Extended Settings / Video effects") ---------
+    // brightness -1..1 (0 = untouched), contrast 0..2 (1 = untouched),
+    // saturation 0..2 (1 = untouched). Applied during the YUV -> RGB pass, so
+    // they cost the same as no effect when left at their defaults.
+    qreal brightness() const { return m_brightness; }
+    void  setBrightness(qreal v);
+    qreal contrast() const { return m_contrast; }
+    void  setContrast(qreal v);
+    qreal saturation() const { return m_saturation; }
+    void  setSaturation(qreal v);
+    Q_INVOKABLE void resetEffects();
+    bool effectsActive() const;
+
+    /// Write the current picture to a PNG (native resolution, effects applied).
+    /// `directory` defaults to Pictures/snapshots; returns the file written, or
+    /// an empty string on failure. Thread-safe.
+    Q_INVOKABLE QString takeSnapshot(const QString& directory = QString());
+
 signals:
     void hasFrameChanged();
     void sourceSizeChanged();
+    void effectsChanged();
 
 private:
     mutable QMutex m_mutex;
@@ -56,6 +78,9 @@ private:
     qreal    m_par = 1.0;
     int      m_w = 0;
     int      m_h = 0;
+    qreal    m_brightness = 0.0;
+    qreal    m_contrast = 1.0;
+    qreal    m_saturation = 1.0;
 };
 
 }  // namespace avera
