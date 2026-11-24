@@ -102,12 +102,12 @@ bool Decoder::open_stream(const std::string& iso_path, const MpsEntry& entry) {
     // already delivered as raw ATRAC3+ payloads by the PSMF demuxer, which is
     // exactly what Atrac3PlusDecoder expects.
     if (info.has_audio) {
-        m_native_audio = std::make_unique<umdplay::Atrac3PlusDecoder>();
-        if (m_native_audio->init(2)) {
+        m_audio_backend = umdplay::make_native_atrac3p_backend();
+        if (m_audio_backend && m_audio_backend->init(2)) {
             m_audio.stream_index = 1;
             m_audio.block_align  = static_cast<int>(info.audio_stride);
         } else {
-            m_native_audio.reset();
+            m_audio_backend.reset();
         }
     }
 #else
@@ -177,7 +177,7 @@ void Decoder::close() {
     m_fps = 29.97;
     m_demux.close();
 #if defined(UMDPLAY_NATIVE_ATRAC3P)
-    m_native_audio.reset();
+    m_audio_backend.reset();
 #else
     if (m_swr_ctx) { swr_free(&m_swr_ctx); }
 #endif
@@ -281,9 +281,9 @@ void Decoder::decode_audio_packet(const umdplay::PsmfPacket& pkt) {
     }
 
 #if defined(UMDPLAY_NATIVE_ATRAC3P)
-    if (m_native_audio) {
+    if (m_audio_backend) {
         const size_t before = m_pcm_ready.size();
-        m_native_audio->decode(pkt.data.data(), pkt.data.size(), m_pcm_ready);
+        m_audio_backend->decode(pkt.data.data(), pkt.data.size(), m_pcm_ready);
         const size_t added = m_pcm_ready.size() - before;
         m_audio_samples += static_cast<int64_t>(added / (2 * sizeof(int16_t)));
         if (added && !m_align_done) apply_align();

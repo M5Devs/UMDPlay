@@ -7,6 +7,7 @@
 // replaced with plain C++.
 
 #include "atrac3p_decoder.h"
+#include "audio_decoder_backend.h"
 
 #include <cstring>
 #include <mutex>
@@ -368,6 +369,29 @@ int Atrac3PlusDecoder::decode(const uint8_t* data, size_t size,
         pcm_bytes[base + i * 2 + 1] = static_cast<uint8_t>(v >> 8);
     }
     return ret;
+}
+
+namespace {
+
+// Adapts the concrete decoder to the AudioDecoderBackend seam used by Decoder.
+class NativeAtrac3pBackend final : public AudioDecoderBackend {
+public:
+    bool init(int channels) override { return m_dec.init(channels); }
+    int decode(const uint8_t* data, size_t size, std::vector<uint8_t>& pcm) override {
+        return m_dec.decode(data, size, pcm);
+    }
+    void reset() override { m_dec.reset(); }
+    int sample_rate() const override { return Atrac3PlusDecoder::kSampleRate; }
+    int channels() const override { return m_dec.channels(); }
+
+private:
+    Atrac3PlusDecoder m_dec;
+};
+
+}  // namespace
+
+std::unique_ptr<AudioDecoderBackend> make_native_atrac3p_backend() {
+    return std::make_unique<NativeAtrac3pBackend>();
 }
 
 }  // namespace umdplay

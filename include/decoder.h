@@ -7,9 +7,10 @@
 #include <cstdint>
 #include <vector>
 
-// Native ATRAC3+ decoder (no libavcodec / libswresample on the audio path).
+// Audio decoder seam. With UMDPLAY_NATIVE_ATRAC3P (default) the backend is
+// UMDPlay's own ATRAC3+ decoder; otherwise FFmpeg + libswresample.
 #if defined(UMDPLAY_NATIVE_ATRAC3P)
-#include "atrac3p_decoder.h"
+#include "audio_decoder_backend.h"
 #endif
 
 extern "C" {
@@ -122,14 +123,14 @@ public:
     bool using_psmf_audio() const { return m_audio.stream_index != -1; }
     int  audio_sample_rate() const {
 #if defined(UMDPLAY_NATIVE_ATRAC3P)
-        if (m_native_audio) return umdplay::Atrac3PlusDecoder::kSampleRate;
+        if (m_audio_backend) return m_audio_backend->sample_rate();
 #endif
         return m_audio.codec_ctx ? m_audio.codec_ctx->sample_rate : 0;
     }
     // True when the built-in ATRAC3+ decoder (not libavcodec) is in use.
     bool using_native_audio() const {
 #if defined(UMDPLAY_NATIVE_ATRAC3P)
-        return m_native_audio != nullptr;
+        return m_audio_backend != nullptr;
 #else
         return false;
 #endif
@@ -217,7 +218,7 @@ private:
     bool             m_audio_flushed = false;
 
 #if defined(UMDPLAY_NATIVE_ATRAC3P)
-    std::unique_ptr<umdplay::Atrac3PlusDecoder> m_native_audio;  // zero-FFmpeg audio
+    std::unique_ptr<umdplay::AudioDecoderBackend> m_audio_backend;  // zero-FFmpeg
 #else
     SwrContext*      m_swr_ctx     = nullptr;
 #endif

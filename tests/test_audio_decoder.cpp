@@ -9,6 +9,7 @@
 #include "iso_reader.h"
 #if defined(UMDPLAY_NATIVE_ATRAC3P)
 #include "atrac3p_decoder.h"
+#include "audio_decoder_backend.h"
 #endif
 
 #include <algorithm>
@@ -239,8 +240,26 @@ static int native_selftest() {
         CHECK(p.size() == (size_t)Atrac3PlusDecoder::kSamplesPerFrame * 2);
     }
 
+    // The AudioDecoderBackend seam is what Decoder actually drives.
+    {
+        std::unique_ptr<umdplay::AudioDecoderBackend> be =
+            umdplay::make_native_atrac3p_backend();
+        CHECK(be != nullptr);
+        CHECK(be->init(2));
+        CHECK(be->sample_rate() == Atrac3PlusDecoder::kSampleRate);
+        CHECK(be->channels() == 2);
+        std::vector<uint8_t> bytes;
+        CHECK(be->decode(kSilenceFrame, sizeof(kSilenceFrame), bytes) ==
+              Atrac3PlusDecoder::kSamplesPerFrame);
+        CHECK(bytes.size() == Atrac3PlusDecoder::kBytesPerFrame);
+        be->reset();
+        bytes.clear();
+        CHECK(be->decode(kSilenceFrame, sizeof(kSilenceFrame), bytes) ==
+              Atrac3PlusDecoder::kSamplesPerFrame);
+    }
+
     std::cout << "[+] native Atrac3PlusDecoder: layout, 688/1712 strides, "
-                 "malformed input and reset ok\n";
+                 "malformed input, backend seam and reset ok\n";
     return 0;
 }
 
