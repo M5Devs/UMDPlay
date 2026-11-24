@@ -8,7 +8,10 @@ Item {
 
     property var hub: null          // AveraHub
     property var player: null       // AveraPlayerController
+    property var sfx: null          // AveraSfx (optional; null = silent)
     property string logoSource: ""
+
+    function chime(cue) { if (sfx) sfx.playNamed(cue) }
 
     signal playRequested()
     signal discMenuRequested()
@@ -86,7 +89,9 @@ Item {
             model: root.hub ? root.hub.categories : []
             current: root.hub ? root.hub.currentCategory : 0
             onSelected: function (index) {
+                if (root.hub && root.hub.currentCategory === index) return;
                 if (root.hub) root.hub.currentCategory = index;
+                root.chime("navigate");
             }
         }
 
@@ -109,7 +114,7 @@ Item {
                       ? root.hub.mediumText.replace("-ROM", "").replace("-", " ")
                       : ""
                 badges: root.hub ? root.hub.heroBadges : []
-                onActivated: root.playRequested()
+                onActivated: { root.chime("select"); root.playRequested() }
             }
 
             PeekCard {
@@ -125,7 +130,7 @@ Item {
                 kind: root.hub ? root.hub.peekKind : ""
                 slot: root.hub ? root.hub.peekSlot : ""
                 cta: root.hub ? root.hub.peekCta : ""
-                onActivated: root.chaptersRequested()
+                onActivated: { root.chime("select"); root.chaptersRequested() }
             }
 
             Row {
@@ -140,25 +145,25 @@ Item {
                     icon: "play"
                     primary: true
                     focused: root.hub ? root.hub.focusIndex === 0 : true
-                    onClicked: root.playRequested()
+                    onClicked: { root.chime("select"); root.playRequested() }
                 }
                 ActionPill {
                     text: "Disc Menu"
                     icon: "menu-book"
                     focused: root.hub ? root.hub.focusIndex === 1 : false
-                    onClicked: root.discMenuRequested()
+                    onClicked: { root.chime("select"); root.discMenuRequested() }
                 }
                 ActionPill {
                     text: root.hub ? root.hub.chapterPillText : "Chapters"
                     icon: "chapters"
                     focused: root.hub ? root.hub.focusIndex === 2 : false
-                    onClicked: root.chaptersRequested()
+                    onClicked: { root.chime("select"); root.chaptersRequested() }
                 }
                 ActionPill {
                     text: "Options"
                     icon: "options"
                     focused: root.hub ? root.hub.focusIndex === 3 : false
-                    onClicked: root.optionsRequested()
+                    onClicked: { root.chime("select"); root.optionsRequested() }
                 }
             }
         }
@@ -195,12 +200,12 @@ Item {
             playing: root.player ? root.player.playing : false
             volume: root.player ? root.player.volume : 80
             muted: root.player ? root.player.muted : false
-            onTogglePlay: root.playRequested()
-            onStop: if (root.player) root.player.stop()
-            onSkipPrev: if (root.player) root.player.seekChapter(0)
-            onSkipNext: if (root.player) root.player.skip(30)
-            onRewind: if (root.player) root.player.skip(-15)
-            onForward: if (root.player) root.player.skip(15)
+            onTogglePlay: { root.chime("select"); root.playRequested() }
+            onStop: { root.chime("back"); if (root.player) root.player.stop() }
+            onSkipPrev: { root.chime("navigate"); if (root.player) root.player.seekChapter(0) }
+            onSkipNext: { root.chime("navigate"); if (root.player) root.player.skip(30) }
+            onRewind: { root.chime("navigate"); if (root.player) root.player.skip(-15) }
+            onForward: { root.chime("navigate"); if (root.player) root.player.skip(15) }
         }
     }
 }

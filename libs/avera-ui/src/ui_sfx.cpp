@@ -51,16 +51,18 @@ class AveraSfx::Mixer : public QIODevice {
 public:
     Mixer() { open(QIODevice::ReadOnly); }
 
+    // Anchor the cue just ahead of the play cursor: the reader keeps advancing
+    // whether or not a cue is queued, so a separate write cursor would drift.
     void play(const std::vector<int16_t>& cue) {
         QMutexLocker lock(&m_mutex);
-        if (m_cue.empty()) return;
-        if (m_pos + m_cue.size() > m_ring.size()) m_pos = 0;
-        for (size_t i = 0; i < m_cue.size(); ++i) {
-            const size_t at = (m_pos + i) % m_ring.size();
-            const int mixed = m_ring[at] + m_cue[i];
+        if (cue.empty()) return;
+        const size_t lead = static_cast<size_t>(kRate / 50) * kChannels;  // 20 ms
+        const size_t start = (m_read + lead) % m_ring.size();
+        for (size_t i = 0; i < cue.size(); ++i) {
+            const size_t at = (start + i) % m_ring.size();
+            const int mixed = m_ring[at] + cue[i];
             m_ring[at] = static_cast<int16_t>(std::clamp(mixed, -32768, 32767));
         }
-        m_pos = (m_pos + m_cue.size()) % m_ring.size();
     }
 
     qint64 readData(char* data, qint64 maxlen) override {
@@ -81,9 +83,7 @@ public:
 private:
     mutable QMutex        m_mutex;
     std::vector<int16_t>  m_ring = std::vector<int16_t>(static_cast<size_t>(kRate) * kChannels, 0);
-    size_t                m_pos = 0;
     size_t                m_read = 0;
-    std::vector<int16_t>  m_cue;
 };
 
 AveraSfx::AveraSfx(QObject* parent) : QObject(parent) {
@@ -104,7 +104,7 @@ bool AveraSfx::startDevice() {
     const QAudioDevice dev = QMediaDevices::defaultAudioOutput();
     if (dev.isNull() || !dev.isFormatSupported(fmt)) return false;
     m_sink = new QAudioSink(dev, fmt, this);
-    m_sink->setVolume(0.35);
+    m_sink->setVolume(0.6);
     m_sink->start(m_mixer);
     return true;
 }

@@ -14,6 +14,9 @@ Window {
     // Mode: hub | player
     property string mode: "hub"
 
+    // AveraSfx is owned by the host (see main.cpp) and exposed as `uiSfx`.
+    function chime(cue) { if (uiSfx) uiSfx.playNamed(cue) }
+
     FocusScope {
         id: scope
         anchors.fill: parent
@@ -21,18 +24,19 @@ Window {
 
         Keys.onPressed: function (ev) {
             if (root.mode === "hub") {
-                if (ev.key === Qt.Key_Left) { hubModel.moveFocus(-1); ev.accepted = true }
-                else if (ev.key === Qt.Key_Right) { hubModel.moveFocus(1); ev.accepted = true }
-                else if (ev.key === Qt.Key_Up) { hubModel.moveCategory(-1); ev.accepted = true }
-                else if (ev.key === Qt.Key_Down) { hubModel.moveCategory(1); ev.accepted = true }
+                if (ev.key === Qt.Key_Left) { root.chime("navigate"); hubModel.moveFocus(-1); ev.accepted = true }
+                else if (ev.key === Qt.Key_Right) { root.chime("navigate"); hubModel.moveFocus(1); ev.accepted = true }
+                else if (ev.key === Qt.Key_Up) { root.chime("navigate"); hubModel.moveCategory(-1); ev.accepted = true }
+                else if (ev.key === Qt.Key_Down) { root.chime("navigate"); hubModel.moveCategory(1); ev.accepted = true }
                 else if (ev.key === Qt.Key_Return || ev.key === Qt.Key_Enter) {
-                    activateFocus(); ev.accepted = true
-                } else if (ev.key === Qt.Key_Space) { playDisc(); ev.accepted = true }
+                    root.chime("select"); activateFocus(); ev.accepted = true
+                } else if (ev.key === Qt.Key_Space) { root.chime("select"); playDisc(); ev.accepted = true }
+                else if (ev.key === Qt.Key_Escape) { root.chime("back"); ev.accepted = true }
             } else {
-                if (ev.key === Qt.Key_Space) { playerCtl.togglePlay(); ev.accepted = true }
-                else if (ev.key === Qt.Key_Left) { playerCtl.skip(-10); ev.accepted = true }
-                else if (ev.key === Qt.Key_Right) { playerCtl.skip(10); ev.accepted = true }
-                else if (ev.key === Qt.Key_Escape) { root.mode = "hub"; ev.accepted = true }
+                if (ev.key === Qt.Key_Space) { root.chime("select"); playerCtl.togglePlay(); ev.accepted = true }
+                else if (ev.key === Qt.Key_Left) { root.chime("navigate"); playerCtl.skip(-10); ev.accepted = true }
+                else if (ev.key === Qt.Key_Right) { root.chime("navigate"); playerCtl.skip(10); ev.accepted = true }
+                else if (ev.key === Qt.Key_Escape) { root.chime("back"); root.mode = "hub"; ev.accepted = true }
             }
         }
 
@@ -62,6 +66,7 @@ Window {
                 anchors.fill: parent
                 hub: hubModel
                 player: playerCtl
+                sfx: uiSfx
                 logoSource: "image://discart/logo"
                 onPlayRequested: scope.playDisc()
                 onDiscMenuRequested: { playerCtl.pokeOsd(); root.mode = "player" }

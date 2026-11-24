@@ -29,6 +29,7 @@
 #include "avera_ui/art_provider.h"
 #include "avera_ui/audio_output.h"
 #include "avera_ui/hub.h"
+#include "avera_ui/ui_sfx.h"
 #include "avera_ui/player_controller.h"
 #include "avera_ui/video_item.h"
 
@@ -262,6 +263,7 @@ int main(int argc, char** argv) {
     avera::AveraHub hub;
     avera::AveraPlayerController player;
     avera::AveraAudioOutput audio;
+    avera::AveraSfx sfx;
 
     const MpsEntry* featureEntry = featureStream(disc);
     if (!featureEntry) return 3;
@@ -373,6 +375,7 @@ int main(int argc, char** argv) {
     engine.addImageProvider(QStringLiteral("discart"), art);
     engine.rootContext()->setContextProperty(QStringLiteral("hubModel"), &hub);
     engine.rootContext()->setContextProperty(QStringLiteral("playerCtl"), &player);
+    engine.rootContext()->setContextProperty(QStringLiteral("uiSfx"), &sfx);
     engine.load(QUrl(QStringLiteral("qrc:/avera/app/Main.qml")));
     if (engine.rootObjects().isEmpty()) return 5;
 
@@ -438,6 +441,9 @@ int main(int argc, char** argv) {
         backend->pump();
     });
     tick.start();
+
+    // Startup chime once the window is on screen and the audio device is live.
+    QTimer::singleShot(600, &app, [&sfx]() { sfx.play(avera::AveraSfx::Startup); });
 
     QObject::connect(&app, &QGuiApplication::aboutToQuit, [&]() {
         tick.stop();

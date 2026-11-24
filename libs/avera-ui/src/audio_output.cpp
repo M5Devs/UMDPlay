@@ -46,7 +46,9 @@ public:
 
     qint64 readData(char* data, qint64 maxlen) override {
         QMutexLocker lock(&m_mutex);
-        const size_t want = static_cast<size_t>(maxlen);
+        // maxlen is bytes while the ring holds int16 samples: convert first, or
+        // the copy overruns the caller's buffer by up to 2x.
+        const size_t want = static_cast<size_t>(maxlen) / sizeof(int16_t);
         const size_t have = std::min(want, m_buf.size());
         if (have) std::memcpy(data, m_buf.data(), have * sizeof(int16_t));
         if (have < want) {
