@@ -11,7 +11,7 @@
 #include <iostream>
 
 // The video elementary stream is timestamped on the PES 90 kHz clock.
-static constexpr int PSMF_TIMESCALE = 90000;
+static constexpr double PSMF_TIMESCALE = 90000.0;
 
 // Largest PCM chunk handed back per read_frame (a couple of ATRAC3+ frames).
 static constexpr size_t PCM_CHUNK_CAP = 16384;
@@ -204,7 +204,7 @@ void Decoder::apply_align() {
     constexpr int    kRate    = 44100;
     constexpr size_t kFrameSz = sizeof(int16_t) * 2;   // bytes per stereo frame
 
-    const double audio_pts = static_cast<double>(m_psmf_next_pts) / 90000.0;
+    const double audio_pts = static_cast<double>(m_psmf_next_pts) / PSMF_TIMESCALE;
     const double lead      = m_pts_anchor - audio_pts;   // >0: audio is early
     const int64_t frames   = static_cast<int64_t>(std::llround(lead * kRate));
     m_align_done = true;
